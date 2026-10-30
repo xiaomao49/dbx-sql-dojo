@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SQL 练习场</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>SQL 练习场</h1>
+        <div class="filters">
+          <button data-f="all" class="active" type="button">全部</button>
+          <button data-f="Easy" type="button">简单</button>
+          <button data-f="Medium" type="button">中等</button>
+          <button data-f="Hard" type="button">困难</button>
+        </div>
+        <div class="progress" id="progress"></div>
+      </header>
+      <div class="body">
+        <aside id="list"></aside>
+        <main id="detail"></main>
+      </div>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "com.mashidong.sql-dojo",
+  "name": "SQL 练习场",
+  "version": "0.1.2",
+  "publisher": "mashidong",
+  "description": "在 DBX 里刷力扣 SQL 50 题，自带题库和判题，离线可用",
+  "icon": "assets/plugin.svg",
+  "engines": {
+    "dbx": ">=0.5.68",
+    "host_api": "1"
+  },
+  "entrypoints": {
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "com.mashidong.sql-dojo.workbench",
+      "label": "SQL 练习场",
+      "description": "Sandboxed frontend workbench contributed by SQL 练习场.",
+      "icon": "assets/plugin.svg"
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "SQL 练习场",
+      "description": "在 DBX 里刷力扣 SQL 50 题，自带题库和判题，离线可用",
+      "contributions": {
+        "com.mashidong.sql-dojo.workbench": {
+          "label": "SQL 练习场",
+          "description": "由插件提供的沙箱前端工作台。"
+        }
+      }
+    }
+  }
+}
