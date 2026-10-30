@@ -171,3 +171,29 @@ button.btn:disabled { opacity: .5; cursor: wait; }
 .solution { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 0; }
 
 .loading { padding: 40px; text-align: center; color: var(--muted); }
+
+.badge.topic {
+  border-color: color-mix(in srgb, var(--brand) 45%, transparent);
+  color: var(--brand-ink);
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+}
+
+.hint {
+  display: none;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--brand) 35%, transparent);
+  background: color-mix(in srgb, var(--brand) 9%, transparent);
+  line-height: 1.75;
+}
+
+.hint.show { display: block; }
+
+.hint-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brand-ink);
+  margin-bottom: 4px;
+  letter-spacing: .05em;
+}

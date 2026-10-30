@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "com.mashidong.sql-dojo",
   "name": "SQL 练习场",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "mashidong",
   "description": "在 DBX 里刷力扣 SQL 50 题，自带题库和判题，离线可用",
   "icon": "assets/plugin.svg",

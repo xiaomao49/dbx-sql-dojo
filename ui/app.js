@@ -201,6 +201,7 @@ function openQuestion(id) {
     el('h2', { text: q.title }),
     el('span', { class: `badge ${q.difficulty}`, text: DIFF_CN[q.difficulty] || q.difficulty }),
     el('span', { class: 'badge', text: `力扣 ${q.lcId}` }),
+    q.topic ? el('span', { class: 'badge topic', text: q.topic }) : null,
   );
 
   const desc = el('p', { class: 'desc', text: q.desc });
@@ -227,8 +228,21 @@ function openQuestion(id) {
 
   const runBtn = el('button', { class: 'btn', text: '运行' });
   const checkBtn = el('button', { class: 'btn primary', text: '检查答案' });
+  const hintBtn = el('button', { class: 'btn', text: '💡 提示' });
   const showBtn = el('button', { class: 'btn', text: '看答案' });
   const resetBtn = el('button', { class: 'btn', text: '重置本题' });
+
+  const hintWrap = el('div', { class: 'hint' },
+    el('div', { class: 'hint-label', text: '💡 思路提示' }),
+    el('div', { text: q.hint || '这题还没写提示。' }),
+  );
+  let hintOpen = false;
+  function toggleHint(force) {
+    hintOpen = force === undefined ? !hintOpen : force;
+    hintWrap.classList.toggle('show', hintOpen);
+    hintBtn.textContent = hintOpen ? '收起提示' : '💡 提示';
+  }
+  hintBtn.addEventListener('click', () => toggleHint());
 
   function run(compare) {
     const sql = editor.value.trim();
@@ -252,6 +266,7 @@ function openQuestion(id) {
         verdict.className = `verdict ${v.ok ? 'ok' : 'bad'} show`;
         verdict.textContent = v.ok ? `✅ ${v.msg}` : `❌ ${v.msg}`;
         if (v.ok) { state.done.add(q.id); saveProgress(); renderList(); }
+        else { toggleHint(true); }
       } else {
         verdict.className = 'verdict info show';
         verdict.textContent = '已运行。检查答案请点右边的按钮。';
@@ -288,7 +303,8 @@ function openQuestion(id) {
   main.append(
     head, desc, schemaWrap,
     el('section', {}, el('h3', { text: '你的 SQL' }), el('div', { class: 'editor-wrap' }, editor)),
-    el('div', { class: 'actions' }, runBtn, checkBtn, showBtn, resetBtn),
+    el('div', { class: 'actions' }, runBtn, checkBtn, hintBtn, showBtn, resetBtn),
+    hintWrap,
     verdict,
     el('section', {}, el('h3', { text: '结果' }), resultWrap),
     el('section', {}, solutionWrap),
