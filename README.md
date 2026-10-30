@@ -41,7 +41,7 @@ ui/vendor/sql-wasm.* sql.js，浏览器里的 SQLite
 - 标题和难度：力扣题库接口
 - 中文题面：本插件自己写的简述（不整段转载力扣原文）
 
-构建脚本在 `D:\Documents\claude\sql-dojo-build\`：`build.py` 负责解析 + MySQL→SQLite 转换 + 逐题验证，`generate.py` 负责合并标题/难度/题面。
+构建脚本在 `tools/`：`parse_bank.py` 负责解析 + MySQL→SQLite 转换 + 逐题验证，`render_bank.py` 负责合并标题/难度/题面并生成 `ui/questions.js`。详见 [tools/README.md](tools/README.md)。
 
 ## 已知限制
 
