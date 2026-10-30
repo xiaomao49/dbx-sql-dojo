@@ -1,17 +1,20 @@
 {
-  "name": "sql-dojo-gen",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "dbx-sql-dojo",
+  "version": "0.3.1",
+  "description": "LeetCode SQL 50 practice workbench for DBX, powered by PostgreSQL (PGlite).",
+  "private": true,
+  "author": "xiaomao49",
+  "license": "MIT",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "bundle:engine": "node tools/bundle_engine.mjs",
+    "build:vendor": "python -I tools/build_pg_vendor.py",
+    "build:bank": "python -I tools/parse_bank_pg.py",
+    "verify:bank": "node tools/verify_pg.mjs",
+    "render:bank": "python -I tools/render_bank.py",
+    "package": "dbx-plugin package . --target universal"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "@electric-sql/pglite": "^0.5.13",
-    "sql.js": "^1.15.2"
+    "@electric-sql/pglite": "^0.5.13"
   },
   "devDependencies": {
     "esbuild": "^0.28.2"

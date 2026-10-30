@@ -6,7 +6,7 @@
 
 ## 安装
 
-1. 打包好的安装包在 `dist/com.mashidong.sql-dojo-<version>-universal.dbxp`
+1. 打包好的安装包在 `dist/com.xiaomao49.sql-dojo-<version>-universal.dbxp`
 2. 打开 DBX → 插件中心 → 设置，勾选「允许安装未签名开发包」
 3. 导入 `.dbxp`（插件中心 → 安装 / 导入本地包）
 4. 插件中心 → 已安装，打开「SQL 练习场」

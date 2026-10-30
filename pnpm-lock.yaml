@@ -11,9 +11,6 @@ importers:
       '@electric-sql/pglite':
         specifier: ^0.5.13
         version: 0.5.13
-      sql.js:
-        specifier: ^1.15.2
-        version: 1.15.2
     devDependencies:
       esbuild:
         specifier: ^0.28.2
@@ -185,9 +182,6 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
-  sql.js@1.15.2:
-    resolution: {integrity: sha512-ZmMYFsZPZWDKIJUh3A5rdnpRV3hB/r7AijwAzSzLnfv/9CSx4obUmDtA8brAjWJWjGtUVh43nIEJ+6nl6HuOUg==}
-
 snapshots:
 
   '@electric-sql/pglite@0.5.13': {}
@@ -298,5 +292,3 @@ snapshots:
       '@esbuild/win32-arm64': 0.28.2
       '@esbuild/win32-ia32': 0.28.2
       '@esbuild/win32-x64': 0.28.2
-
-  sql.js@1.15.2: {}
