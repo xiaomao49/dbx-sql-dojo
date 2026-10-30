@@ -4,7 +4,7 @@ import os
 import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RAW = os.path.join(ROOT, "tools", "raw_questions.json")
+RAW = os.path.join(ROOT, "tools", "raw_questions_pg.json")
 OUT = os.path.join(ROOT, "ui", "questions.js")
 
 # id: (leetcode_id, 中文标题, 难度)
@@ -227,8 +227,8 @@ def main():
             'topic': TOPIC[i],
             'setup': r['setup'],
             'answer': r['answer'],
-            'type': r['type'],
-            'cols': r['cols'],
+            'type': r.get('type', 'select'),
+            'cols': r.get('cols', []),
         })
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:

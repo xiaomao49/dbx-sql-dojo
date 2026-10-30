@@ -6,3 +6,5 @@
 node_modules/
 
 tools/raw_questions.json
+tools/raw_questions_pg.json
+/test-pg/

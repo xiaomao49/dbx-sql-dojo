@@ -1,4 +1,4 @@
-/* SQL 练习场 — DBX frontend plugin */
+/* SQL 练习场 — DBX frontend plugin (PostgreSQL via PGlite) */
 const LS_KEY = 'sql-dojo.done.v1';
 
 const state = {
@@ -9,7 +9,7 @@ const state = {
   showSolution: false,
 };
 
-let SQL = null;
+let pg = null;
 
 /* ---------- storage ---------- */
 function loadProgress() {
@@ -54,7 +54,13 @@ function parseSchema(setup) {
 
 function normCell(v) {
   if (v === null || v === undefined) return '\u0000null';
+  if (v instanceof Date) return v.toISOString();
   if (typeof v === 'number') return String(Math.round(v * 1e6) / 1e6);
+  if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v.trim())) {
+    const n = Number(v);
+    return Number.isFinite(n) ? String(Math.round(n * 1e6) / 1e6) : v;
+  }
+  if (v instanceof Uint8Array) return Array.from(v).join(',');
   return String(v);
 }
 
@@ -71,49 +77,79 @@ function sameRows(a, b) {
   return A.every((x, i) => x === B[i]);
 }
 
-/* ---------- sqlite ---------- */
-function makeDb(q) {
-  const db = new SQL.Database();
-  db.run(q.setup);
+/* ---------- postgres ---------- */
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`脚本加载失败：${src}`));
+    document.head.append(s);
+  });
+}
+
+async function gunzipB64(b64) {
+  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).arrayBuffer();
+}
+
+async function initEngine() {
+  await loadScript('vendor/pglite-bundle.js');
+  await loadScript('vendor/pglite-assets.js');
+  const A = window.PGLITE_ASSETS;
+  if (!A) throw new Error('PostgreSQL 资源没有加载成功');
+  const [w, i, d] = await Promise.all([gunzipB64(A.wasm), gunzipB64(A.initdb), gunzipB64(A.data)]);
+  const db = new window.PGlite({
+    pgliteWasmModule: await WebAssembly.compile(w),
+    initdbWasmModule: await WebAssembly.compile(i),
+    fsBundle: new Blob([d]),
+  });
+  await db.waitReady;
   return db;
 }
 
-function lastResult(db, sql) {
-  const res = db.exec(sql);
-  if (!res.length) return { columns: [], values: [] };
-  const r = res[res.length - 1];
-  return { columns: r.columns, values: r.values };
+async function resetAndSetup(q) {
+  await pg.exec('drop schema if exists public cascade; create schema public;');
+  await pg.exec(q.setup);
 }
 
-function dumpTables(db) {
-  const names = db.exec("select name from sqlite_master where type='table' and name not like 'sqlite_%' order by name");
-  if (!names.length) return [];
+async function runSql(sql) {
+  const r = await pg.query(sql);
+  const cols = (r.fields || []).map(f => f.name);
+  return { columns: cols, values: r.rows.map(row => cols.map(c => row[c])) };
+}
+
+async function dumpTables() {
+  const t = await pg.query("select tablename from pg_tables where schemaname = 'public' order by tablename");
   const out = [];
-  for (const [n] of names[0].values) {
-    const r = db.exec(`select * from "${n}"`);
-    out.push({ table: n, columns: r[0].columns, values: r[0].values });
+  for (const row of t.rows) {
+    const name = row.tablename;
+    const r = await pg.query(`select * from "${name}"`);
+    const cols = (r.fields || []).map(f => f.name);
+    out.push({ table: name, columns: cols, values: r.rows.map(x => cols.map(c => x[c])) });
   }
   return out;
 }
 
 /* ---------- verdict ---------- */
-function check(q, userSql) {
+async function check(q, userSql) {
   let userOut;
   try {
-    const db = makeDb(q);
-    userOut = q.type === 'dml' ? dumpTables(db.run(userSql) && db) : lastResult(db, userSql);
-    db.close();
+    await resetAndSetup(q);
+    if (q.type === 'dml') { await pg.exec(userSql); userOut = await dumpTables(); }
+    else userOut = await runSql(userSql);
   } catch (e) {
-    return { ok: false, msg: `SQL 执行出错：${e.message}` };
+    return { ok: false, msg: `SQL 执行出错：${(e.message || e).split('\n')[0]}` };
   }
 
   let ansOut;
   try {
-    const db = makeDb(q);
-    ansOut = q.type === 'dml' ? dumpTables(db.run(q.answer) && db) : lastResult(db, q.answer);
-    db.close();
+    await resetAndSetup(q);
+    if (q.type === 'dml') { await pg.exec(q.answer); ansOut = await dumpTables(); }
+    else ansOut = await runSql(q.answer);
   } catch (e) {
-    return { ok: false, msg: `标准答案执行失败（插件问题）：${e.message}` };
+    return { ok: false, msg: `标准答案执行失败（插件问题）：${(e.message || e).split('\n')[0]}` };
   }
 
   if (q.type === 'dml') {
@@ -155,8 +191,7 @@ function renderList() {
       el('span', { class: 'mark', text: done ? '✓' : '' }),
     ));
   }
-  const total = state.bank.length;
-  document.getElementById('progress').textContent = `进度 ${state.done.size}/${total}`;
+  document.getElementById('progress').textContent = `进度 ${state.done.size}/${state.bank.length}`;
 }
 
 function renderResult(container, columns, values) {
@@ -176,7 +211,7 @@ function renderResult(container, columns, values) {
     for (const v of row) {
       tr.append(v === null
         ? el('td', {}, el('span', { class: 'null', text: 'NULL' }))
-        : el('td', { text: String(v) }));
+        : el('td', { text: v instanceof Date ? v.toISOString().slice(0, 10) : String(v) }));
     }
     body.append(tr);
   }
@@ -219,8 +254,7 @@ function openQuestion(id) {
   }
   schemaWrap.append(st);
 
-  const editor = el('textarea', { spellcheck: 'false', placeholder: '在这里写 SQL，Ctrl+Enter 运行' });
-  editor.value = '';
+  const editor = el('textarea', { spellcheck: 'false', placeholder: '在这里写 SQL，Ctrl+Enter 检查' });
 
   const verdict = el('div', { class: 'verdict' });
   const resultWrap = el('div', { class: 'result' });
@@ -244,25 +278,24 @@ function openQuestion(id) {
   }
   hintBtn.addEventListener('click', () => toggleHint());
 
-  function run(compare) {
+  async function run(compare) {
     const sql = editor.value.trim();
     if (!sql) { verdict.className = 'verdict info show'; verdict.textContent = '先写点 SQL 吧。'; return; }
     runBtn.disabled = checkBtn.disabled = true;
     try {
-      const db = makeDb(q);
+      await resetAndSetup(q);
       if (q.type === 'dml') {
-        db.run(sql);
-        const tables = dumpTables(db);
+        await pg.exec(sql);
+        const tables = await dumpTables();
         const t = tables[0] || { columns: [], values: [] };
         renderResult(resultWrap, t.columns, t.values);
       } else {
-        const r = lastResult(db, sql);
+        const r = await runSql(sql);
         renderResult(resultWrap, r.columns, r.values);
       }
-      db.close();
 
       if (compare) {
-        const v = check(q, sql);
+        const v = await check(q, sql);
         verdict.className = `verdict ${v.ok ? 'ok' : 'bad'} show`;
         verdict.textContent = v.ok ? `✅ ${v.msg}` : `❌ ${v.msg}`;
         if (v.ok) { state.done.add(q.id); saveProgress(); renderList(); }
@@ -273,7 +306,7 @@ function openQuestion(id) {
       }
     } catch (e) {
       verdict.className = 'verdict bad show';
-      verdict.textContent = `SQL 执行出错：${e.message}`;
+      verdict.textContent = `SQL 执行出错：${(e.message || e).split('\n')[0]}`;
       resultWrap.innerHTML = '';
     } finally {
       runBtn.disabled = checkBtn.disabled = false;
@@ -302,7 +335,7 @@ function openQuestion(id) {
 
   main.append(
     head, desc, schemaWrap,
-    el('section', {}, el('h3', { text: '你的 SQL' }), el('div', { class: 'editor-wrap' }, editor)),
+    el('section', {}, el('h3', { text: '你的 SQL（PostgreSQL）' }), el('div', { class: 'editor-wrap' }, editor)),
     el('div', { class: 'actions' }, runBtn, checkBtn, hintBtn, showBtn, resetBtn),
     hintWrap,
     verdict,
@@ -322,31 +355,6 @@ function bindHeader() {
   });
 }
 
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error(`脚本加载失败：${src}`));
-    document.head.append(s);
-  });
-}
-
-async function initEngine() {
-  // 首选：wasm 内联版，不需要额外取文件；失败则退回纯 JS 版
-  await loadScript('vendor/sql-wasm-inline.js');
-  try {
-    return await initSqlJs();
-  } catch (e1) {
-    await loadScript('vendor/sql-asm.js');
-    try {
-      return await initSqlJs();
-    } catch (e2) {
-      throw new Error(`${e1.message}；回退纯 JS 版也失败：${e2.message}`);
-    }
-  }
-}
-
 async function loadBank() {
   if (Array.isArray(window.SQL_DOJO_BANK)) return window.SQL_DOJO_BANK;
   await loadScript('questions.js');
@@ -356,13 +364,12 @@ async function loadBank() {
 
 async function boot() {
   const main = document.getElementById('detail');
-  main.innerHTML = '<div class="loading">正在加载题库…</div>';
+  main.innerHTML = '<div class="loading">正在启动 PostgreSQL 引擎（首次约 3-5 秒）…</div>';
   try {
-    SQL = await initEngine();
     state.bank = await loadBank();
-    loadProgress();
     bindHeader();
     renderList();
+    pg = await initEngine();
     const first = state.bank.find(q => !state.done.has(q.id)) || state.bank[0];
     openQuestion(first.id);
   } catch (e) {

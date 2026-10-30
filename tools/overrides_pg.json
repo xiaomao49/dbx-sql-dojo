@@ -1,0 +1,14 @@
+{
+  "14": {
+    "answer": "select s.user_id,\n  round((avg(case when c.action = 'confirmed' then 1 else 0 end))::numeric, 2) as confirmation_rate\nfrom Signups as s\nleft join Confirmations as c on s.user_id = c.user_id\ngroup by s.user_id;"
+  },
+  "30": {
+    "setup": "DROP TABLE IF EXISTS Employees;\nCREATE TABLE Employees ( employee_id INT, name VARCHAR ( 20 ), reports_to INT, age INT );\nINSERT INTO Employees ( employee_id, name, reports_to, age )\nVALUES\n  ( 9, 'Hercy', NULL, 43 ),\n  ( 6, 'Alice', 9, 41 ),\n  ( 4, 'Bob', 9, 36 ),\n  ( 2, 'Winston', NULL, 37 );"
+  },
+  "49": {
+    "answer": "select p.product_name, sum(o.unit) as unit\nfrom Products as p, Orders as o\nwhere p.product_id = o.product_id\n  and left((o.order_date)::text, 7) = '2020-02'\ngroup by p.product_id, p.product_name\nhaving sum(o.unit) >= 100;"
+  },
+  "50": {
+    "answer": "select * from Users as t\nwhere t.mail ~ '^[a-zA-Z][-._a-zA-Z0-9]*@leetcode\\.com$';"
+  }
+}
