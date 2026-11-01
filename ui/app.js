@@ -1,5 +1,5 @@
-/* SQL 练习场 — DBX frontend plugin (PostgreSQL via PGlite) */
-const LS_KEY = 'sql-dojo.done.v1';
+/* SQL 练习场 — DBX frontend plugin (PostgreSQL 18.6 via PGlite) */
+const PROGRESS_KEY = 'progress';
 
 const state = {
   bank: [],
@@ -7,22 +7,52 @@ const state = {
   filter: 'all',
   done: new Set(),
   showSolution: false,
+  persistent: false,
 };
 
 let pg = null;
+let engineNotice = '';
 
-/* ---------- storage ---------- */
-function loadProgress() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (raw) state.done = new Set(JSON.parse(raw));
-  } catch (_) { /* opaque origin */ }
+/* ---------- storage ----------
+ * 沙箱是 opaque origin，localStorage 在里面会直接抛 SecurityError，进度必须走
+ * 宿主的 host.storage（manifest 里声明 host.storage 权限后才可用）。宿主没有
+ * 授予存储能力时降级为内存态，并在界面上说明「本次会话有效」。 */
+function uiStorage() {
+  const api = window.dbxPlugin;
+  return api && api.capabilities && api.capabilities.storage ? api.storage : null;
 }
 
-function saveProgress() {
+async function loadProgress() {
+  const storage = uiStorage();
+  if (!storage) return;
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify([...state.done]));
-  } catch (_) { /* ignore */ }
+    const value = await storage.get(PROGRESS_KEY);
+    state.persistent = true;
+    if (Array.isArray(value)) {
+      state.done = new Set(value.filter(n => Number.isInteger(n)));
+    }
+  } catch (_) {
+    state.persistent = false;
+  }
+}
+
+async function saveProgress() {
+  const storage = uiStorage();
+  if (!storage) return;
+  try {
+    await storage.set(PROGRESS_KEY, [...state.done]);
+    state.persistent = true;
+  } catch (_) {
+    state.persistent = false;
+  }
+  renderProgress();
+}
+
+function renderProgress() {
+  const node = document.getElementById('progress');
+  if (!node) return;
+  const suffix = state.persistent ? '' : ' · 本次会话有效';
+  node.textContent = `进度 ${state.done.size}/${state.bank.length}${suffix}`;
 }
 
 /* ---------- helpers ---------- */
@@ -94,19 +124,53 @@ async function gunzipB64(b64) {
   return new Response(stream).arrayBuffer();
 }
 
+/* 宿主沙箱的 CSP 目前是 script-src 'unsafe-inline' blob: <asset>，没有
+ * 'wasm-unsafe-eval'，WebAssembly.compile 会被拦下。先用 8 字节的最小模块
+ * 探一下，拦了就给出中文说明，而不是把浏览器的英文 CSP 报错甩给用户。 */
+async function wasmAllowed() {
+  try {
+    await WebAssembly.compile(new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+const WASM_BLOCKED_MSG =
+  '当前版本的 DBX 插件沙箱还不允许运行 WebAssembly，内置 PostgreSQL 引擎因此无法启动。' +
+  '题库和提示可以照常浏览；把 DBX 更新到支持 WebAssembly 的版本后重新打开本工作台即可运行 SQL。';
+
 async function initEngine() {
   await loadScript('vendor/pglite-bundle.js');
   await loadScript('vendor/pglite-assets.js');
   const A = window.PGLITE_ASSETS;
   if (!A) throw new Error('PostgreSQL 资源没有加载成功');
   const [w, i, d] = await Promise.all([gunzipB64(A.wasm), gunzipB64(A.initdb), gunzipB64(A.data)]);
+  let wasmModule, initdbModule;
+  try {
+    wasmModule = await WebAssembly.compile(w);
+    initdbModule = await WebAssembly.compile(i);
+  } catch (e) {
+    // CSP 拦截时浏览器报的是英文 unsafe-eval 错误，统一换成中文说明。
+    throw new Error(/unsafe-eval|wasm/i.test(String(e && e.message)) ? WASM_BLOCKED_MSG : `WebAssembly 编译失败：${e.message}`);
+  }
   const db = new window.PGlite({
-    pgliteWasmModule: await WebAssembly.compile(w),
-    initdbWasmModule: await WebAssembly.compile(i),
+    pgliteWasmModule: wasmModule,
+    initdbWasmModule: initdbModule,
     fsBundle: new Blob([d]),
   });
   await db.waitReady;
   return db;
+}
+
+async function engineLabel(db) {
+  try {
+    const r = await db.query('select version() as v');
+    const m = /PostgreSQL\s+([\d.]+).*?PGlite\s+([\d.]+)/.exec(r.rows[0].v || '');
+    return m ? `PostgreSQL ${m[1]} · PGlite ${m[2]}` : '';
+  } catch (_) {
+    return '';
+  }
 }
 
 async function resetAndSetup(q) {
@@ -191,7 +255,7 @@ function renderList() {
       el('span', { class: 'mark', text: done ? '✓' : '' }),
     ));
   }
-  document.getElementById('progress').textContent = `进度 ${state.done.size}/${state.bank.length}`;
+  renderProgress();
 }
 
 function renderResult(container, columns, values) {
@@ -231,6 +295,7 @@ function openQuestion(id) {
 
   const main = document.getElementById('detail');
   main.innerHTML = '';
+  if (engineNotice) main.append(el('div', { class: 'verdict bad show', text: engineNotice }));
 
   const head = el('div', { class: 'qhead' },
     el('h2', { text: q.title }),
@@ -279,6 +344,11 @@ function openQuestion(id) {
   hintBtn.addEventListener('click', () => toggleHint());
 
   async function run(compare) {
+    if (!pg) {
+      verdict.className = 'verdict bad show';
+      verdict.textContent = engineNotice || '数据库引擎没有启动，暂时无法运行 SQL。';
+      return;
+    }
     const sql = editor.value.trim();
     if (!sql) { verdict.className = 'verdict info show'; verdict.textContent = '先写点 SQL 吧。'; return; }
     runBtn.disabled = checkBtn.disabled = true;
@@ -368,8 +438,20 @@ async function boot() {
   try {
     state.bank = await loadBank();
     bindHeader();
+    await loadProgress();
     renderList();
-    pg = await initEngine();
+    if (await wasmAllowed()) {
+      try {
+        pg = await initEngine();
+        const badge = document.getElementById('engine');
+        if (badge) badge.textContent = await engineLabel(pg);
+      } catch (e) {
+        engineNotice = e.message || String(e);
+      }
+    } else {
+      engineNotice = WASM_BLOCKED_MSG;
+    }
+    // 引擎起不来也照样能浏览题库、看提示，只是不能运行 SQL。
     const first = state.bank.find(q => !state.done.has(q.id)) || state.bank[0];
     openQuestion(first.id);
   } catch (e) {

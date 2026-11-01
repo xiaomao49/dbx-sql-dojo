@@ -3,14 +3,15 @@
   "manifest_version": 1,
   "id": "com.xiaomao49.sql-dojo",
   "name": "SQL 练习场",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "xiaomao49",
-  "description": "在 DBX 里刷力扣 SQL 50 题，自带题库和判题，离线可用",
+  "description": "在 DBX 里刷力扣 SQL 50 题，自带题库、判题和 PostgreSQL 18.6 引擎，离线可用",
   "icon": "assets/plugin.svg",
   "engines": {
-    "dbx": ">=0.5.68",
+    "dbx": ">=0.6.19",
     "host_api": "1"
   },
+  "permissions": ["host.storage"],
   "entrypoints": {
     "ui": {
       "root": "ui",
@@ -29,7 +30,7 @@
   "localizations": {
     "zh-CN": {
       "name": "SQL 练习场",
-      "description": "在 DBX 里刷力扣 SQL 50 题，自带题库和判题，离线可用",
+      "description": "在 DBX 里刷力扣 SQL 50 题，自带题库、判题和 PostgreSQL 18.6 引擎，离线可用",
       "contributions": {
         "com.xiaomao49.sql-dojo.workbench": {
           "label": "SQL 练习场",

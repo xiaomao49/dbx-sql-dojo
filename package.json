@@ -1,7 +1,7 @@
 {
   "name": "dbx-sql-dojo",
-  "version": "0.3.1",
-  "description": "LeetCode SQL 50 practice workbench for DBX, powered by PostgreSQL (PGlite).",
+  "version": "0.3.2",
+  "description": "LeetCode SQL 50 practice workbench for DBX, powered by PostgreSQL 18.6 (PGlite 0.5.13, WebAssembly).",
   "private": true,
   "author": "xiaomao49",
   "license": "MIT",
@@ -11,12 +11,14 @@
     "build:bank": "python -I tools/parse_bank_pg.py",
     "verify:bank": "node tools/verify_pg.mjs",
     "render:bank": "python -I tools/render_bank.py",
-    "package": "dbx-plugin package . --target universal"
+    "package": "dbx-plugin package . --target universal",
+    "test:e2e": "node tests/e2e/run.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.13"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "playwright": "^1.56.0"
   }
 }
