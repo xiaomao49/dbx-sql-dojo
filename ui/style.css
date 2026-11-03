@@ -199,3 +199,20 @@ button.btn:disabled { opacity: .5; cursor: wait; }
   margin-bottom: 4px;
   letter-spacing: .05em;
 }
+
+button.btn.sm { padding: 4px 12px; font-size: 12px; font-weight: 600; }
+
+.bankrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-bottom: 8px;
+}
+
+.bankmeta { color: var(--muted); font-size: 12px; }
+
+.bank-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }

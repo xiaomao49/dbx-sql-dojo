@@ -1,8 +1,11 @@
 /* SQL 练习场 — DBX frontend plugin (PostgreSQL 18.6 via PGlite) */
 const PROGRESS_KEY = 'progress';
+const BANK_KEY = 'custom-banks';
 
 const state = {
   bank: [],
+  builtin: [],
+  customBanks: [],
   currentId: null,
   filter: 'all',
   done: new Set(),
@@ -29,7 +32,7 @@ async function loadProgress() {
     const value = await storage.get(PROGRESS_KEY);
     state.persistent = true;
     if (Array.isArray(value)) {
-      state.done = new Set(value.filter(n => Number.isInteger(n)));
+      state.done = new Set(value.filter(n => Number.isInteger(n) || typeof n === 'string'));
     }
   } catch (_) {
     state.persistent = false;
@@ -238,6 +241,203 @@ async function check(q, userSql) {
   return { ok: true, msg: '通过！结果和标准答案一致。' };
 }
 
+/* ---------- custom banks ---------- */
+const DIFFS = ['Easy', 'Medium', 'Hard'];
+
+function uiTransfer() {
+  const api = window.dbxPlugin;
+  if (!api || !api.capabilities || !api.capabilities.fileTransfer) return null;
+  return api.fileTransfer || null;
+}
+
+async function readTextFile(handleId) {
+  const ft = uiTransfer();
+  const parts = [];
+  let offset = 0;
+  for (;;) {
+    const chunk = await ft.read(handleId, offset, 256 * 1024);
+    parts.push(chunk.dataBase64 || '');
+    if (chunk.eof || !chunk.length) break;
+    offset += chunk.length;
+  }
+  await ft.cancel(handleId).catch(() => {});
+  const bin = atob(parts.join(''));
+  return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+}
+
+async function saveTextFile(name, text) {
+  const ft = uiTransfer();
+  const bytes = new TextEncoder().encode(text);
+  const target = await ft.beginSave({ name, contentType: 'application/json', size: bytes.byteLength });
+  if (!target) return false;
+  const chunkBytes = target.chunkBytes || 64 * 1024;
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const slice = bytes.slice(offset, offset + chunkBytes);
+    const r = await ft.write(target.handleId, offset, slice);
+    offset = r.nextOffset != null ? r.nextOffset : offset + slice.byteLength;
+  }
+  await ft.finish(target.handleId);
+  return true;
+}
+
+async function loadCustomBanks() {
+  const storage = uiStorage();
+  if (!storage) return [];
+  try {
+    const v = await storage.get(BANK_KEY);
+    if (v && Array.isArray(v.banks)) return v.banks;
+  } catch (_) { /* ignore */ }
+  return [];
+}
+
+async function saveCustomBanks(banks) {
+  const storage = uiStorage();
+  if (!storage) throw new Error('宿主没有提供存储能力，无法保存题库');
+  await storage.set(BANK_KEY, { schemaVersion: 1, banks });
+  state.customBanks = banks;
+}
+
+function rebuildBank() {
+  const custom = state.customBanks.flatMap(b => b.questions || []);
+  state.bank = [...state.builtin, ...custom];
+}
+
+function nextCustomSeq(banks) {
+  let max = 0;
+  for (const b of banks) {
+    for (const q of b.questions || []) {
+      const m = /^c(\d+)$/.exec(String(q.id));
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+  }
+  return max + 1;
+}
+
+function normalizeQuestion(raw, index) {
+  const no = index + 1;
+  if (!raw || typeof raw !== 'object') return { error: `第 ${no} 题不是对象` };
+  const title = String(raw.title || '').trim();
+  const setup = String(raw.setup || '').trim();
+  const answer = String(raw.answer || '').trim();
+  if (!title) return { error: `第 ${no} 题缺少 title` };
+  if (!setup) return { error: `第 ${no} 题缺少 setup` };
+  if (!answer) return { error: `第 ${no} 题缺少 answer` };
+  if (setup.length > 20000) return { error: `第 ${no} 题 setup 超过 20 KB` };
+  if (answer.length > 20000) return { error: `第 ${no} 题 answer 超过 20 KB` };
+  const body = answer.replace(/\/\*[\s\S]*?\*\//g, '').trim();
+  return {
+    q: {
+      title,
+      desc: String(raw.desc || '').trim() || '（没有写题目描述）',
+      difficulty: DIFFS.includes(raw.difficulty) ? raw.difficulty : 'Easy',
+      topic: String(raw.topic || '').trim(),
+      hint: String(raw.hint || '').trim(),
+      setup,
+      answer,
+      type: /^(delete|update|insert)\b/i.test(body) ? 'dml' : 'select',
+      lcId: null,
+    },
+  };
+}
+
+async function validateQuestion(q) {
+  if (!pg) return { ok: false, msg: '数据库引擎没启动，无法验证（需要 DBX 支持 WebAssembly）' };
+  try {
+    await pg.exec('drop schema if exists public cascade; create schema public;');
+    await pg.exec(q.setup);
+    if (q.type === 'dml') {
+      await pg.exec(q.answer);
+      const tables = await dumpTables();
+      if (!tables.length) return { ok: false, msg: '执行后没有表' };
+      return { ok: true, msg: '通过（DML）' };
+    }
+    const r = await pg.query(q.answer);
+    const cols = (r.fields || []).map(f => f.name);
+    if (!cols.length) return { ok: false, msg: '标准答案没有返回结果集' };
+    if (!r.rows.length) return { ok: false, msg: '标准答案返回 0 行，检查数据或过滤条件' };
+    return { ok: true, msg: `通过（${r.rows.length} 行 × ${cols.length} 列）` };
+  } catch (e) {
+    return { ok: false, msg: (e.message || String(e)).split('\n')[0] };
+  }
+}
+
+async function parseBankText(text, onProgress) {
+  let data;
+  try { data = JSON.parse(text); } catch (e) { return { error: `不是合法的 JSON：${e.message}` }; }
+  if (!data || typeof data !== 'object') return { error: '顶层必须是一个对象' };
+  if (!Array.isArray(data.questions)) return { error: '缺少 questions 数组' };
+  if (!data.questions.length) return { error: 'questions 是空的' };
+  if (data.questions.length > 200) return { error: '一次最多导入 200 题' };
+
+  const name = String(data.name || '').trim() || '未命名题库';
+  const results = [];
+  const questions = [];
+  for (let i = 0; i < data.questions.length; i++) {
+    const n = normalizeQuestion(data.questions[i], i);
+    if (n.error) {
+      results.push({ no: i + 1, title: String(data.questions[i]?.title || ''), ok: false, msg: n.error });
+    } else {
+      const v = await validateQuestion(n.q);
+      results.push({ no: i + 1, title: n.q.title, ok: v.ok, msg: v.msg });
+      if (v.ok) questions.push(n.q);
+    }
+    if (onProgress) onProgress(i + 1, data.questions.length);
+  }
+  return { name, questions, results };
+}
+
+async function addCustomBank(name, questions) {
+  const banks = [...state.customBanks];
+  const start = nextCustomSeq(banks);
+  const withIds = questions.map((q, i) => ({ ...q, id: `c${start + i}` }));
+  banks.push({
+    id: 'b' + Date.now().toString(36),
+    name,
+    importedAt: new Date().toISOString(),
+    questions: withIds,
+  });
+  await saveCustomBanks(banks);
+  rebuildBank();
+}
+
+async function removeCustomBank(bankId) {
+  const bank = state.customBanks.find(b => b.id === bankId);
+  const banks = state.customBanks.filter(b => b.id !== bankId);
+  for (const q of bank?.questions || []) state.done.delete(q.id);
+  await saveCustomBanks(banks);
+  rebuildBank();
+  await saveProgress();
+}
+
+function templateText() {
+  return JSON.stringify({
+    schemaVersion: 1,
+    name: '我的题库',
+    _help: '把 questions 里的题目换成你自己的。setup 用来建表和灌数据，answer 是标准答案。两个都要能在 PostgreSQL 上直接执行，answer 必须能返回至少一行结果。difficulty 只能填 Easy / Medium / Hard。',
+    questions: [
+      {
+        title: '统计每个城市的订单数',
+        desc: '按城市汇总订单数量，从多到少排列。',
+        difficulty: 'Easy',
+        topic: '分组聚合',
+        hint: '先想清楚按什么分组、按什么排序。',
+        setup: "drop table if exists demo_orders;\ncreate table demo_orders (id int, city text, amount int);\ninsert into demo_orders values (1,'北京',100),(2,'上海',200),(3,'北京',300),(4,'广州',50);",
+        answer: 'select city, count(*) as order_count from demo_orders group by city order by order_count desc;',
+      },
+      {
+        title: '每个城市金额最高的订单',
+        desc: '找出每个城市金额最大的那一笔订单，输出订单号、城市和金额。',
+        difficulty: 'Medium',
+        topic: '窗口函数',
+        hint: '可以用 row_number() over (partition by ... order by ...) 排个名再挑第一名。',
+        setup: "drop table if exists demo_orders2;\ncreate table demo_orders2 (id int, city text, amount int);\ninsert into demo_orders2 values (1,'北京',100),(2,'北京',300),(3,'上海',200),(4,'上海',80);",
+        answer: 'select id, city, amount from (select *, row_number() over (partition by city order by amount desc) as rn from demo_orders2) t where rn = 1 order by city;',
+      },
+    ],
+  }, null, 2);
+}
+
 /* ---------- render ---------- */
 function renderList() {
   const list = document.getElementById('list');
@@ -300,7 +500,9 @@ function openQuestion(id) {
   const head = el('div', { class: 'qhead' },
     el('h2', { text: q.title }),
     el('span', { class: `badge ${q.difficulty}`, text: DIFF_CN[q.difficulty] || q.difficulty }),
-    el('span', { class: 'badge', text: `力扣 ${q.lcId}` }),
+    q.lcId
+      ? el('span', { class: 'badge', text: `力扣 ${q.lcId}` })
+      : el('span', { class: 'badge', text: '自定义' }),
     q.topic ? el('span', { class: 'badge topic', text: q.topic }) : null,
   );
 
@@ -414,6 +616,155 @@ function openQuestion(id) {
   );
 }
 
+/* ---------- bank manager ---------- */
+function openBankManager() {
+  const main = document.getElementById('detail');
+  state.currentId = null;
+  state.showSolution = false;
+  renderList();
+  main.innerHTML = '';
+
+  const back = el('button', { class: 'btn', text: '← 返回题目' });
+  back.addEventListener('click', () => {
+    const first = state.bank.find(q => !state.done.has(q.id)) || state.bank[0];
+    if (first) openQuestion(first.id);
+  });
+
+  main.append(el('div', { class: 'qhead' }, el('h2', { text: '题库管理' }), back));
+
+  main.append(el('p', {
+    class: 'desc',
+    text: '把自己写的题目导进来练。先下载模板，在里面按格式写好题目，再导回来。导入时每道题都会在本地 PostgreSQL 里实际跑一遍，跑不出结果的不会入库。',
+  }));
+
+  const status = el('div', { class: 'verdict' });
+  const setStatus = (cls, text) => {
+    status.className = `verdict ${cls} show`;
+    status.textContent = text;
+  };
+
+  const listWrap = el('div', { class: 'bank-list' });
+
+  const tplBtn = el('button', { class: 'btn', text: '下载模板' });
+  const fileBtn = el('button', { class: 'btn', text: '导入文件' });
+  const pasteArea = el('textarea', { placeholder: '或者把题库 JSON 直接粘贴到这里…', style: 'min-height:150px' });
+  const pasteBtn = el('button', { class: 'btn primary', text: '导入粘贴内容' });
+
+  async function doImport(text, source) {
+    setStatus('info', `正在验证题库（${source}）…`);
+    const parsed = await parseBankText(text, (n, total) => setStatus('info', `正在验证第 ${n}/${total} 题…`));
+    if (parsed.error) { setStatus('bad', `导入失败：${parsed.error}`); return; }
+    const bad = parsed.results.filter(r => !r.ok);
+    if (!parsed.questions.length) {
+      setStatus('bad', `没有可用的题目。${bad.map(b => `第 ${b.no} 题：${b.msg}`).join('；')}`);
+      return;
+    }
+    try {
+      await addCustomBank(parsed.name, parsed.questions);
+    } catch (e) {
+      setStatus('bad', `保存失败：${(e.message || e).split('\n')[0]}`);
+      return;
+    }
+    const msg = `已导入「${parsed.name}」${parsed.questions.length} 题`
+      + (bad.length ? `；${bad.length} 题未通过 —— ${bad.map(b => `第 ${b.no} 题（${b.msg}）`).join('；')}` : '');
+    setStatus(bad.length ? 'info' : 'ok', msg);
+    pasteArea.value = '';
+    renderBankList();
+    renderList();
+  }
+
+  tplBtn.addEventListener('click', async () => {
+    const ft = uiTransfer();
+    const text = templateText();
+    if (!ft || !ft.beginSave) {
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus('info', '当前宿主不支持保存文件，模板已复制到剪贴板。');
+      } catch (_) {
+        setStatus('bad', '当前宿主不支持保存文件，也无法访问剪贴板。');
+      }
+      return;
+    }
+    try {
+      const ok = await saveTextFile('sql-dojo-template.json', text);
+      if (ok) setStatus('ok', '模板已保存为 sql-dojo-template.json。');
+    } catch (e) {
+      setStatus('bad', `保存失败：${(e.message || e).split('\n')[0]}`);
+    }
+  });
+
+  fileBtn.addEventListener('click', async () => {
+    const ft = uiTransfer();
+    if (!ft || !ft.pick) {
+      setStatus('info', '当前宿主不支持选择文件，请用下面的粘贴方式导入。');
+      return;
+    }
+    try {
+      const res = await ft.pick({ multiple: false });
+      const files = (res && res.files) || [];
+      if (!files.length) return;
+      const text = await readTextFile(files[0].handleId);
+      await doImport(text, files[0].name);
+    } catch (e) {
+      setStatus('bad', `读取文件失败：${(e.message || e).split('\n')[0]}`);
+    }
+  });
+
+  pasteBtn.addEventListener('click', () => {
+    const text = pasteArea.value.trim();
+    if (!text) { setStatus('info', '先粘贴题库内容。'); return; }
+    doImport(text, '粘贴');
+  });
+
+  function renderBankList() {
+    listWrap.innerHTML = '';
+    if (!state.customBanks.length) {
+      listWrap.append(el('div', { class: 'loading', text: '还没有导入自定义题库。' }));
+      return;
+    }
+    for (const b of state.customBanks) {
+      const info = el('div', {},
+        el('strong', { text: b.name }),
+        el('span', {
+          class: 'bankmeta',
+          text: ` · ${(b.questions || []).length} 题 · ${new Date(b.importedAt).toLocaleDateString()}`,
+        }),
+      );
+      const del = el('button', { class: 'btn', text: '删除' });
+      let armed = false;
+      del.addEventListener('click', async () => {
+        if (!armed) {
+          armed = true;
+          del.textContent = '确定删除？';
+          setTimeout(() => { armed = false; del.textContent = '删除'; }, 4000);
+          return;
+        }
+        try {
+          await removeCustomBank(b.id);
+          renderBankList();
+          renderList();
+          setStatus('ok', `已删除「${b.name}」。`);
+        } catch (e) {
+          setStatus('bad', `删除失败：${(e.message || e).split('\n')[0]}`);
+        }
+      });
+      listWrap.append(el('div', { class: 'bankrow' }, info, del));
+    }
+  }
+
+  main.append(
+    el('section', {}, el('h3', { text: '导入自定义题库' }),
+      el('div', { class: 'bank-actions' }, tplBtn, fileBtn),
+      pasteArea,
+      el('div', { class: 'bank-actions' }, pasteBtn),
+    ),
+    status,
+    el('section', {}, el('h3', { text: '已导入' }), listWrap),
+  );
+
+  renderBankList();
+}
+
 /* ---------- boot ---------- */
 function bindHeader() {
   document.querySelectorAll('.filters button').forEach(btn => {
@@ -423,6 +774,8 @@ function bindHeader() {
       renderList();
     });
   });
+  const bankBtn = document.getElementById('bank-btn');
+  if (bankBtn) bankBtn.addEventListener('click', openBankManager);
 }
 
 async function loadBank() {
@@ -436,7 +789,9 @@ async function boot() {
   const main = document.getElementById('detail');
   main.innerHTML = '<div class="loading">正在启动 PostgreSQL 引擎（首次约 3-5 秒）…</div>';
   try {
-    state.bank = await loadBank();
+    state.builtin = await loadBank();
+    state.customBanks = await loadCustomBanks();
+    rebuildBank();
     bindHeader();
     await loadProgress();
     renderList();

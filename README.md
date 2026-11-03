@@ -26,6 +26,8 @@ npx @dbx-app/plugin-cli@0.1.6 package . --target universal
 - 判题不比对 SQL 文本，而是**分别执行你的 SQL 和标准答案，比较结果集**，写法不同但结果对就算过
 - 进度通过宿主的 `host.storage` 持久化（插件专属键值存储），关闭再开还在；宿主没授予存储能力时降级为
   「本次会话有效」，并在进度旁标注
+- **支持导入自己的题库**：下载模板 → 在别处写好题目 → 导回来。导入时每道题都会在本地 PostgreSQL 里
+  实际跑一遍（建表、灌数据、执行标准答案），跑不出结果的不会入库，并逐题给出原因
 
 ## 权限与数据
 
@@ -33,9 +35,12 @@ npx @dbx-app/plugin-cli@0.1.6 package . --target universal
 
 | 权限 | 用途 |
 |---|---|
-| `host.storage` | 保存「哪些题已经做对」这一份进度（一个键，不超过几 KB） |
+| `host.storage` | 保存做题进度和导入的自定义题库（插件专属键值存储，单值 256 KiB、全库 1 MiB） |
 
-除此之外没有网络、没有文件系统、没有连接、没有剪贴板访问。DBX 的插件沙箱是 opaque origin，
+文件导入导出走 `window.dbxPlugin.fileTransfer`（原生打开/保存对话框），**不需要 manifest 权限**，
+通过 `capabilities.fileTransfer` 探测可用性；宿主不支持时自动降级为「粘贴 JSON 导入」。
+
+除此之外没有网络、没有连接、没有剪贴板读取。DBX 的插件沙箱是 opaque origin，
 `localStorage` 在里面会直接抛 `SecurityError`，所以进度不走浏览器存储，走宿主提供的
 `window.dbxPlugin.storage`。
 
@@ -146,6 +151,45 @@ pnpm test:e2e      # 浏览器里按「宿主沙箱同款 CSP」跑三条路径�
 5. 跑 `render_bank.py`，重新打包
 
 注意：`LC` 里的 key 是题序（1-50），不是力扣题号。
+
+## 自定义题库格式
+
+点「题库管理 → 下载模板」会得到一个 `sql-dojo-template.json`：
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "我的题库",
+  "questions": [
+    {
+      "title": "统计每个城市的订单数",
+      "desc": "按城市汇总订单数量，从多到少排列。",
+      "difficulty": "Easy",
+      "topic": "分组聚合",
+      "hint": "先想清楚按什么分组、按什么排序。",
+      "setup": "create table demo_orders (id int, city text, amount int);\ninsert into demo_orders values (1,'北京',100);",
+      "answer": "select city, count(*) as order_count from demo_orders group by city order by order_count desc;"
+    }
+  ]
+}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `title` | 是 | 题目名，显示在左侧列表 |
+| `setup` | 是 | 建表和灌数据的 SQL，可以写多条 |
+| `answer` | 是 | 标准答案，必须能返回至少一行结果 |
+| `desc` | 否 | 题目描述 |
+| `difficulty` | 否 | `Easy` / `Medium` / `Hard`，默认 Easy |
+| `topic` | 否 | 考察点标签 |
+| `hint` | 否 | 思路提示，答错时自动展开 |
+
+规则：
+
+- 每题 SQL 上限 20 KB，一次最多导入 200 题
+- 导入时逐题执行验证：`setup` 跑不通、`answer` 报错、或 `answer` 返回 0 行的都不会入库
+- 入库后 ID 以 `c` 开头（`c1`、`c2`…），和内置的 1–50 题不冲突
+- 自定义题存在 `host.storage` 里，受全库 1 MiB 上限约束，大约能放八十来道
 
 ## 已知限制
 
