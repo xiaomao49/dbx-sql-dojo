@@ -439,10 +439,18 @@ function templateText() {
 }
 
 /* ---------- render ---------- */
+const isCustomQuestion = q => /^c\d+$/.test(String(q.id));
+
+function matchFilter(q, f) {
+  if (f === 'all') return true;
+  if (f === 'custom') return isCustomQuestion(q);
+  return q.difficulty === f;
+}
+
 function renderList() {
   const list = document.getElementById('list');
   list.innerHTML = '';
-  const items = state.bank.filter(q => state.filter === 'all' || q.difficulty === state.filter);
+  const items = state.bank.filter(q => matchFilter(q, state.filter));
   for (const q of items) {
     const done = state.done.has(q.id);
     list.append(el('div', {
@@ -455,7 +463,31 @@ function renderList() {
       el('span', { class: 'mark', text: done ? '✓' : '' }),
     ));
   }
+  if (!items.length) {
+    list.append(el('div', {
+      class: 'loading',
+      text: state.filter === 'custom'
+        ? '尚未导入自定义题目。'
+        : '该分类下暂无题目。',
+    }));
+  }
   renderProgress();
+}
+
+function renderCustomEmpty() {
+  if (state.bank.some(isCustomQuestion)) return;
+  state.currentId = null;
+  const main = document.getElementById('detail');
+  main.innerHTML = '';
+  if (engineNotice) main.append(el('div', { class: 'verdict bad show', text: engineNotice }));
+  main.append(el('div', { class: 'qhead' }, el('h2', { text: '自定义题库' })));
+  main.append(el('p', {
+    class: 'desc',
+    text: '此分类用于练习自行编写的题目。请点击右上角的「题库管理」，在管理页下载模板、按字段说明填写题目后导入；也可以通过粘贴 JSON 的方式添加。导入时，每道题都会在本机 PostgreSQL 引擎中实际执行建表语句与标准答案，未通过验证的题目不会被写入题库。',
+  }));
+  main.append(el('div', { class: 'actions' },
+    el('button', { class: 'btn primary', text: '前往题库管理', onclick: openBankManager }),
+  ));
 }
 
 function renderResult(container, columns, values) {
@@ -521,7 +553,7 @@ function openQuestion(id) {
   }
   schemaWrap.append(st);
 
-  const editor = el('textarea', { spellcheck: 'false', placeholder: '在这里写 SQL，Ctrl+Enter 检查' });
+  const editor = el('textarea', { spellcheck: 'false', placeholder: '在此输入 SQL 语句，按 Ctrl+Enter 执行检查' });
 
   const verdict = el('div', { class: 'verdict' });
   const resultWrap = el('div', { class: 'result' });
@@ -535,7 +567,7 @@ function openQuestion(id) {
 
   const hintWrap = el('div', { class: 'hint' },
     el('div', { class: 'hint-label', text: '💡 思路提示' }),
-    el('div', { text: q.hint || '这题还没写提示。' }),
+    el('div', { text: q.hint || '本题暂未提供提示。' }),
   );
   let hintOpen = false;
   function toggleHint(force) {
@@ -626,15 +658,17 @@ function openBankManager() {
 
   const back = el('button', { class: 'btn', text: '← 返回题目' });
   back.addEventListener('click', () => {
-    const first = state.bank.find(q => !state.done.has(q.id)) || state.bank[0];
+    const pool = state.filter === 'custom' ? state.bank.filter(isCustomQuestion) : state.bank;
+    const first = pool.find(q => !state.done.has(q.id)) || pool[0];
     if (first) openQuestion(first.id);
+    else renderCustomEmpty();
   });
 
   main.append(el('div', { class: 'qhead' }, el('h2', { text: '题库管理' }), back));
 
   main.append(el('p', {
     class: 'desc',
-    text: '把自己写的题目导进来练。先下载模板，在里面按格式写好题目，再导回来。导入时每道题都会在本地 PostgreSQL 里实际跑一遍，跑不出结果的不会入库。',
+    text: '导入自定义题库可扩充练习内容。请先下载模板，按字段说明填写题目，再通过文件选择或粘贴内容的方式导入。导入过程中，每道题都会在本机 PostgreSQL 引擎中实际执行建表语句与标准答案；无法执行、或结果集为空的题目不会被写入题库，并逐条给出原因。',
   }));
 
   const status = el('div', { class: 'verdict' });
@@ -719,7 +753,7 @@ function openBankManager() {
   function renderBankList() {
     listWrap.innerHTML = '';
     if (!state.customBanks.length) {
-      listWrap.append(el('div', { class: 'loading', text: '还没有导入自定义题库。' }));
+      listWrap.append(el('div', { class: 'loading', text: '尚未导入自定义题库。' }));
       return;
     }
     for (const b of state.customBanks) {
@@ -772,6 +806,13 @@ function bindHeader() {
       state.filter = btn.dataset.f;
       document.querySelectorAll('.filters button').forEach(b => b.classList.toggle('active', b === btn));
       renderList();
+      const pool = state.bank.filter(q => matchFilter(q, state.filter));
+      if (!pool.length) {
+        if (state.filter === 'custom') renderCustomEmpty();
+      } else if (!pool.some(q => q.id === state.currentId)) {
+        const first = pool.find(q => !state.done.has(q.id)) || pool[0];
+        openQuestion(first.id);
+      }
     });
   });
   const bankBtn = document.getElementById('bank-btn');

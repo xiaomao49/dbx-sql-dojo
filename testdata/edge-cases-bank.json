@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "name": "导入边界测试（4 对 2 错）",
+  "questions": [
+    {
+      "title": "① 正常题：查全部员工",
+      "desc": "这道题应该顺利入库，用来做对照组。输出所有员工姓名。",
+      "difficulty": "Easy",
+      "topic": "全表查询",
+      "hint": "select 列名 from 表名。",
+      "setup": "create table t_emp (id int, name text);\ninsert into t_emp values (1,'张三'),(2,'李四');",
+      "answer": "select name from t_emp order by id;"
+    },
+    {
+      "title": "② 缺 setup 字段",
+      "desc": "这道题故意不写建表语句，导入时应该报「缺少 setup」。",
+      "difficulty": "Easy",
+      "answer": "select 1 as n;"
+    },
+    {
+      "title": "③ setup 语法错误",
+      "desc": "建表语句少了一个右括号，导入时应该报语法错误。",
+      "difficulty": "Easy",
+      "setup": "create table t_bad (id int;",
+      "answer": "select id from t_bad;"
+    },
+    {
+      "title": "④ 答案引用了不存在的列",
+      "desc": "表里只有 id 和 name，答案却查 age，导入时应该报字段不存在。",
+      "difficulty": "Easy",
+      "setup": "create table t_emp2 (id int, name text);\ninsert into t_emp2 values (1,'张三');",
+      "answer": "select age from t_emp2;"
+    },
+    {
+      "title": "⑤ 答案返回 0 行",
+      "desc": "过滤条件永远不成立，答案查不出任何数据，导入时应该被拦下。",
+      "difficulty": "Easy",
+      "setup": "create table t_sales (id int, amount int);\ninsert into t_sales values (1,100),(2,200);",
+      "answer": "select id, amount from t_sales where amount > 10000;"
+    },
+    {
+      "title": "⑥ 正常题：金额合计",
+      "desc": "这道题也应该入库，用来确认前面的坏题不会连累后面的好题。",
+      "difficulty": "Medium",
+      "topic": "聚合",
+      "hint": "用 sum() 求和。",
+      "setup": "create table t_sales2 (id int, amount int);\ninsert into t_sales2 values (1,100),(2,200),(3,300);",
+      "answer": "select sum(amount) as total from t_sales2;"
+    }
+  ]
+}

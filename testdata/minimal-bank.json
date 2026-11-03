@@ -1,0 +1,10 @@
+{
+  "name": "单题最小字段",
+  "questions": [
+    {
+      "title": "统计在售商品数量",
+      "setup": "create table t_item (id int, on_sale boolean);\ninsert into t_item values (1,true),(2,false),(3,true);",
+      "answer": "select count(*) as cnt from t_item where on_sale;"
+    }
+  ]
+}
