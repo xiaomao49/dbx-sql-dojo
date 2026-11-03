@@ -16,6 +16,7 @@ const state = {
   currentId: null,
   filter: 'all',
   done: new Set(),
+  drafts: new Map(),
   showSolution: false,
   persistent: false,
 };
@@ -80,6 +81,15 @@ function el(tag, attrs = {}, ...children) {
 }
 
 const DIFF_CN = { Easy: '简单', Medium: '中等', Hard: '困难' };
+
+/* PostgreSQL 错误里的 detail / hint / position 比第一行有用得多。 */
+function formatPgError(e) {
+  const lines = [String((e && e.message) || e || '').split('\n')[0]];
+  if (e && e.detail) lines.push(`详情：${e.detail}`);
+  if (e && e.hint) lines.push(`提示：${e.hint}`);
+  if (e && e.position) lines.push(`位置：${e.position}`);
+  return lines.join('\n');
+}
 
 function parseSchema(setup) {
   const out = [];
@@ -276,7 +286,7 @@ async function check(q, userSql) {
     if (q.type === 'dml') { await pg.exec(userSql); userOut = await dumpTables(); }
     else userOut = await runSql(userSql);
   } catch (e) {
-    return { ok: false, msg: `SQL 执行出错：${(e.message || e).split('\n')[0]}` };
+    return { ok: false, msg: `SQL 执行出错：${formatPgError(e)}` };
   }
 
   if (userOut.truncated) {
@@ -289,7 +299,7 @@ async function check(q, userSql) {
     if (q.type === 'dml') { await pg.exec(q.answer); ansOut = await dumpTables(); }
     else ansOut = await runSql(q.answer);
   } catch (e) {
-    return { ok: false, msg: `标准答案执行失败（插件问题）：${(e.message || e).split('\n')[0]}` };
+    return { ok: false, msg: `标准答案执行失败（插件问题）：${formatPgError(e)}` };
   }
 
   if (ansOut.truncated) {
@@ -335,17 +345,28 @@ function uiTransfer() {
 
 async function readTextFile(handleId) {
   const ft = uiTransfer();
-  const parts = [];
+  const chunks = [];
   let offset = 0;
   for (;;) {
     const chunk = await ft.read(handleId, offset, 256 * 1024);
-    parts.push(chunk.dataBase64 || '');
+    const b64 = chunk.dataBase64 || '';
+    if (b64) {
+      // 每块单独解码：base64 分块拼接后中间会出现 padding 的 '='，atob 会报
+      // "The string contains invalid characters"，所以不能先拼字符串再解码。
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+      chunks.push(bytes);
+    }
     if (chunk.eof || !chunk.length) break;
     offset += chunk.length;
   }
   await ft.cancel(handleId).catch(() => {});
-  const bin = atob(parts.join(''));
-  return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const all = new Uint8Array(total);
+  let pos = 0;
+  for (const c of chunks) { all.set(c, pos); pos += c.length; }
+  return new TextDecoder().decode(all);
 }
 
 async function saveTextFile(name, text) {
@@ -482,11 +503,11 @@ async function validateQuestion(q) {
     if (!tables.length) return { ok: false, msg: '执行后没有表' };
     return { ok: true, type: 'dml', msg: '通过（DML）' };
   } catch (e) {
-    return { ok: false, msg: (e.message || String(e)).split('\n')[0] };
+    return { ok: false, msg: formatPgError(e) };
   }
 }
 
-async function parseBankText(text, onProgress) {
+async function parseBankText(text, onProgress, shouldCancel) {
   let data;
   try { data = JSON.parse(text); } catch (e) { return { error: `不是合法的 JSON：${e.message}` }; }
   if (!data || typeof data !== 'object') return { error: '顶层必须是一个对象' };
@@ -498,6 +519,7 @@ async function parseBankText(text, onProgress) {
   const results = [];
   const normalized = [];
   for (let i = 0; i < data.questions.length; i++) {
+    if (shouldCancel && shouldCancel()) return { cancelled: true, name, questions: [], results };
     const n = normalizeQuestion(data.questions[i], i);
     if (n.error) {
       results.push({ no: i + 1, title: String(data.questions[i]?.title || ''), ok: false, msg: n.error });
@@ -519,6 +541,7 @@ async function parseBankText(text, onProgress) {
 
   const questions = [];
   for (let i = 0; i < normalized.length; i++) {
+    if (shouldCancel && shouldCancel()) return { cancelled: true, name, questions, results };
     const { no, q } = normalized[i];
     const v = await validateQuestion(q);
     results.push({ no, title: q.title, ok: v.ok, msg: v.msg });
@@ -589,10 +612,38 @@ function templateText() {
   }, null, 2);
 }
 
-/* ---------- render ---------- */
-const isCustomQuestion = q => /^c\d+$/.test(String(q.id));
+function bankExportText(banks) {
+  const questions = banks.flatMap(b => (b.questions || []).map(q => ({
+    title: q.title,
+    desc: q.desc,
+    difficulty: q.difficulty,
+    topic: q.topic,
+    hint: q.hint,
+    setup: q.setup,
+    answer: q.answer,
+  })));
+  return JSON.stringify({
+    schemaVersion: 1,
+    name: banks.length === 1 ? banks[0].name : '全部题库',
+    questions,
+  }, null, 2);
+}
 
-function matchFilter(q, f) {
+function safeFileName(name) {
+  return String(name || 'bank').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'bank';
+}
+
+async function saveOrCopy(name, text) {
+  const ft = uiTransfer();
+  if (!ft || !ft.beginSave) {
+    await navigator.clipboard.writeText(text);
+    return 'clipboard';
+  }
+  return (await saveTextFile(name, text)) ? 'file' : '';
+}
+
+/* ---------- render ---------- */
+const isCustomQuestion = q => /^c\d+$/.test(String(q.id));function matchFilter(q, f) {
   if (f === 'all') return true;
   if (f === 'custom') return isCustomQuestion(q);
   return q.difficulty === f;
@@ -600,20 +651,27 @@ function matchFilter(q, f) {
 
 function renderList() {
   const list = document.getElementById('list');
+  const scrollTop = list.scrollTop;
   list.innerHTML = '';
   const items = state.bank.filter(q => matchFilter(q, state.filter));
-  for (const q of items) {
+  items.forEach((q, i) => {
     const done = state.done.has(q.id);
+    const open = () => openQuestion(q.id);
     list.append(el('div', {
       class: `qitem${done ? ' done' : ''}${q.id === state.currentId ? ' active' : ''}`,
-      onclick: () => openQuestion(q.id),
+      role: 'button',
+      tabindex: '0',
+      onclick: open,
+      onkeydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+      },
     },
-      el('span', { class: 'no', text: String(q.id).padStart(2, '0') }),
-      el('span', { class: `lv ${q.difficulty}` }),
+      el('span', { class: 'no', text: String(i + 1).padStart(2, '0') }),
+      el('span', { class: `lv ${q.difficulty}`, role: 'img', 'aria-label': DIFF_CN[q.difficulty] || q.difficulty }),
       el('span', { class: 't', text: q.title }),
       el('span', { class: 'mark', text: done ? '✓' : '' }),
     ));
-  }
+  });
   if (!items.length) {
     list.append(el('div', {
       class: 'loading',
@@ -622,6 +680,7 @@ function renderList() {
         : '该分类下暂无题目。',
     }));
   }
+  list.scrollTop = scrollTop;
   renderProgress();
 }
 
@@ -648,6 +707,7 @@ function renderResult(container, columns, values) {
     return;
   }
   const table = el('table');
+  table.append(el('caption', { class: 'sr-only', text: '查询结果' }));
   const head = el('tr');
   for (const c of columns) head.append(el('th', { text: c }));
   table.append(el('thead', {}, head));
@@ -704,10 +764,16 @@ function openQuestion(id) {
   }
   schemaWrap.append(st);
 
-  const editor = el('textarea', { spellcheck: 'false', placeholder: '在此输入 SQL 语句，按 Ctrl+Enter 执行检查' });
+  const editor = el('textarea', {
+    spellcheck: 'false',
+    placeholder: '在此输入 SQL 语句，按 Ctrl+Enter 执行检查',
+    'aria-label': 'SQL 编辑器',
+  });
+  editor.value = state.drafts.get(q.id) || '';
+  editor.addEventListener('input', () => state.drafts.set(q.id, editor.value));
 
-  const verdict = el('div', { class: 'verdict' });
-  const resultWrap = el('div', { class: 'result' });
+  const verdict = el('div', { class: 'verdict', role: 'status', 'aria-live': 'polite' });
+  const resultWrap = el('div', { class: 'result', 'aria-label': '查询结果' });
   const solutionWrap = el('div', { class: 'solution', style: 'display:none' });
 
   const runBtn = el('button', { class: 'btn', text: '运行' });
@@ -767,7 +833,7 @@ function openQuestion(id) {
       }
     } catch (e) {
       verdict.className = 'verdict bad show';
-      verdict.textContent = `SQL 执行出错：${(e.message || e).split('\n')[0]}`;
+      verdict.textContent = `SQL 执行出错：${formatPgError(e)}`;
       resultWrap.innerHTML = '';
     } finally {
       runBtn.disabled = checkBtn.disabled = false;
@@ -784,6 +850,7 @@ function openQuestion(id) {
   });
   resetBtn.addEventListener('click', () => {
     editor.value = '';
+    state.drafts.delete(q.id);
     verdict.className = 'verdict';
     resultWrap.innerHTML = '';
     state.done.delete(q.id);
@@ -828,40 +895,85 @@ function openBankManager() {
     text: '导入自定义题库可扩充练习内容。请先下载模板，按字段说明填写题目，再通过文件选择或粘贴内容的方式导入。导入过程中，每道题都会在本机 PostgreSQL 引擎中实际执行建表语句与标准答案；无法执行、或结果集为空的题目不会被写入题库，并逐条给出原因。',
   }));
 
-  const status = el('div', { class: 'verdict' });
+  const status = el('div', { class: 'verdict', role: 'status', 'aria-live': 'polite' });
   const setStatus = (cls, text) => {
     status.className = `verdict ${cls} show`;
     status.textContent = text;
   };
 
+  const detailsWrap = el('div', { class: 'import-details' });
+  function showImportDetails(bad) {
+    detailsWrap.innerHTML = '';
+    if (!bad.length) return;
+    const list = el('ul');
+    for (const b of bad) {
+      list.append(el('li', { text: `第 ${b.no} 题${b.title ? `「${b.title}」` : ''}：${b.msg}` }));
+    }
+    detailsWrap.append(el('div', { class: 'verdict bad show' },
+      el('strong', { text: `${bad.length} 题未通过` }), list));
+  }
+
   const listWrap = el('div', { class: 'bank-list' });
 
   const tplBtn = el('button', { class: 'btn', text: '下载模板' });
   const fileBtn = el('button', { class: 'btn', text: '导入文件' });
-  const pasteArea = el('textarea', { placeholder: '或者把题库 JSON 直接粘贴到这里…', style: 'min-height:150px' });
+  const pasteArea = el('textarea', {
+    placeholder: '或者把题库 JSON 直接粘贴到这里…',
+    style: 'min-height:150px',
+    'aria-label': '题库 JSON',
+  });
   const pasteBtn = el('button', { class: 'btn primary', text: '导入粘贴内容' });
+  const cancelBtn = el('button', { class: 'btn', text: '取消导入' });
+  cancelBtn.style.display = 'none';
+  let importing = false;
+  let cancelRequested = false;
+  cancelBtn.addEventListener('click', () => {
+    cancelRequested = true;
+    setStatus('info', '正在取消导入…');
+  });
 
   async function doImport(text, source) {
-    setStatus('info', `正在验证题库（${source}）…`);
-    const parsed = await parseBankText(text, (n, total) => setStatus('info', `正在验证第 ${n}/${total} 题…`));
-    if (parsed.error) { setStatus('bad', `导入失败：${parsed.error}`); return; }
-    const bad = parsed.results.filter(r => !r.ok);
-    if (!parsed.questions.length) {
-      setStatus('bad', `没有可用的题目。${bad.map(b => `第 ${b.no} 题：${b.msg}`).join('；')}`);
-      return;
-    }
+    if (importing) { setStatus('info', '已有导入在进行中，请等它结束或先取消。'); return; }
+    importing = true;
+    cancelRequested = false;
+    showImportDetails([]);
+    pasteBtn.disabled = fileBtn.disabled = tplBtn.disabled = true;
+    cancelBtn.style.display = '';
     try {
-      await addCustomBank(parsed.name, parsed.questions);
+      setStatus('info', `正在验证题库（${source}）…`);
+      const parsed = await parseBankText(
+        text,
+        (n, total) => setStatus('info', `正在验证第 ${n}/${total} 题…`),
+        () => cancelRequested,
+      );
+      if (parsed.cancelled) {
+        setStatus('info', `已取消导入；已通过验证的 ${parsed.questions.length} 道题没有写入。`);
+        return;
+      }
+      if (parsed.error) { setStatus('bad', `导入失败：${parsed.error}`); return; }
+      const bad = parsed.results.filter(r => !r.ok);
+      showImportDetails(bad);
+      if (!parsed.questions.length) {
+        setStatus('bad', '没有可用的题目，原因见下。');
+        return;
+      }
+      try {
+        await addCustomBank(parsed.name, parsed.questions);
+      } catch (e) {
+        setStatus('bad', `保存失败：${formatPgError(e)}`);
+        return;
+      }
+      setStatus(bad.length ? 'info' : 'ok', `已导入「${parsed.name}」${parsed.questions.length} 题。`);
+      pasteArea.value = '';
+      renderBankList();
+      renderList();
     } catch (e) {
-      setStatus('bad', `保存失败：${(e.message || e).split('\n')[0]}`);
-      return;
+      setStatus('bad', `导入失败：${formatPgError(e)}`);
+    } finally {
+      importing = false;
+      pasteBtn.disabled = fileBtn.disabled = tplBtn.disabled = false;
+      cancelBtn.style.display = 'none';
     }
-    const msg = `已导入「${parsed.name}」${parsed.questions.length} 题`
-      + (bad.length ? `；${bad.length} 题未通过 —— ${bad.map(b => `第 ${b.no} 题（${b.msg}）`).join('；')}` : '');
-    setStatus(bad.length ? 'info' : 'ok', msg);
-    pasteArea.value = '';
-    renderBankList();
-    renderList();
   }
 
   tplBtn.addEventListener('click', async () => {
@@ -880,7 +992,7 @@ function openBankManager() {
       const ok = await saveTextFile('sql-dojo-template.json', text);
       if (ok) setStatus('ok', '模板已保存为 sql-dojo-template.json。');
     } catch (e) {
-      setStatus('bad', `保存失败：${(e.message || e).split('\n')[0]}`);
+      setStatus('bad', `保存失败：${formatPgError(e)}`);
     }
   });
 
@@ -897,7 +1009,7 @@ function openBankManager() {
       const text = await readTextFile(files[0].handleId);
       await doImport(text, files[0].name);
     } catch (e) {
-      setStatus('bad', `读取文件失败：${(e.message || e).split('\n')[0]}`);
+      setStatus('bad', `读取文件失败：${formatPgError(e)}`);
     }
   });
 
@@ -905,6 +1017,17 @@ function openBankManager() {
     const text = pasteArea.value.trim();
     if (!text) { setStatus('info', '先粘贴题库内容。'); return; }
     doImport(text, '粘贴');
+  });
+
+  const exportAllBtn = el('button', { class: 'btn sm', text: '导出全部' });
+  exportAllBtn.addEventListener('click', async () => {
+    if (!state.customBanks.length) { setStatus('info', '还没有可导出的自定义题库。'); return; }
+    try {
+      const how = await saveOrCopy('sql-dojo-banks.json', bankExportText(state.customBanks));
+      setStatus('ok', how === 'clipboard' ? '宿主不支持保存文件，已把全部题库复制到剪贴板。' : '已导出全部题库。');
+    } catch (e) {
+      setStatus('bad', `导出失败：${formatPgError(e)}`);
+    }
   });
 
   function renderBankList() {
@@ -921,6 +1044,16 @@ function openBankManager() {
           text: ` · ${(b.questions || []).length} 题 · ${new Date(b.importedAt).toLocaleDateString()}`,
         }),
       );
+      const actions = el('div', { class: 'bank-row-actions' });
+      const exportBtn = el('button', { class: 'btn', text: '导出' });
+      exportBtn.addEventListener('click', async () => {
+        try {
+          const how = await saveOrCopy(`${safeFileName(b.name)}.json`, bankExportText([b]));
+          setStatus('ok', how === 'clipboard' ? `宿主不支持保存文件，已把「${b.name}」复制到剪贴板。` : `已导出「${b.name}」。`);
+        } catch (e) {
+          setStatus('bad', `导出失败：${formatPgError(e)}`);
+        }
+      });
       const del = el('button', { class: 'btn', text: '删除' });
       let armed = false;
       del.addEventListener('click', async () => {
@@ -936,10 +1069,11 @@ function openBankManager() {
           renderList();
           setStatus('ok', `已删除「${b.name}」。`);
         } catch (e) {
-          setStatus('bad', `删除失败：${(e.message || e).split('\n')[0]}`);
+          setStatus('bad', `删除失败：${formatPgError(e)}`);
         }
       });
-      listWrap.append(el('div', { class: 'bankrow' }, info, del));
+      actions.append(exportBtn, del);
+      listWrap.append(el('div', { class: 'bankrow' }, info, actions));
     }
   }
 
@@ -947,10 +1081,11 @@ function openBankManager() {
     el('section', {}, el('h3', { text: '导入自定义题库' }),
       el('div', { class: 'bank-actions' }, tplBtn, fileBtn),
       pasteArea,
-      el('div', { class: 'bank-actions' }, pasteBtn),
+      el('div', { class: 'bank-actions' }, pasteBtn, cancelBtn),
     ),
     status,
-    el('section', {}, el('h3', { text: '已导入' }), listWrap),
+    detailsWrap,
+    el('section', {}, el('div', { class: 'section-head' }, el('h3', { text: '已导入' }), exportAllBtn), listWrap),
   );
 
   renderBankList();

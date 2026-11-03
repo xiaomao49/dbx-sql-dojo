@@ -92,6 +92,7 @@ aside {
 }
 
 .qitem:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.qitem:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 .qitem.active { background: color-mix(in srgb, var(--brand) 16%, transparent); }
 
 .qitem .no { color: var(--muted); font-size: 11px; min-width: 18px; font-variant-numeric: tabular-nums; }
@@ -157,7 +158,7 @@ button.btn:hover { border-color: var(--brand); }
 button.btn.primary { background: var(--brand); border-color: var(--brand); color: #1a1200; }
 button.btn:disabled { opacity: .5; cursor: wait; }
 
-.verdict { padding: 10px 14px; border-radius: 10px; margin: 0 0 12px; display: none; line-height: 1.6; }
+.verdict { padding: 10px 14px; border-radius: 10px; margin: 0 0 12px; display: none; line-height: 1.6; white-space: pre-wrap; }
 .verdict.show { display: block; }
 .verdict.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
 .verdict.bad { background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 30%, transparent); }
@@ -214,5 +215,25 @@ button.btn.sm { padding: 4px 12px; font-size: 12px; font-weight: 600; }
 }
 
 .bankmeta { color: var(--muted); font-size: 12px; }
+
+.bank-row-actions { display: flex; gap: 8px; flex: none; }
+
+.section-head { display: flex; align-items: center; gap: 10px; }
+.section-head h3 { margin: 0; }
+
+.import-details ul { margin: 6px 0 0; padding-left: 20px; }
+.import-details li { line-height: 1.6; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 .bank-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }

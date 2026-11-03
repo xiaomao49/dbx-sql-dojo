@@ -12,6 +12,9 @@ importers:
         specifier: ^0.5.13
         version: 0.5.13
     devDependencies:
+      '@dbx-app/plugin-cli':
+        specifier: 0.1.6
+        version: 0.1.6
       esbuild:
         specifier: ^0.28.2
         version: 0.28.2
@@ -20,6 +23,49 @@ importers:
         version: 1.64.1
 
 packages:
+
+  '@dbx-app/plugin-cli-darwin-arm64@0.1.6':
+    resolution: {integrity: sha512-pf+d8mi9xjlxcyU8cLHmEe7OxPsuyfgoB3mLqoOwPLIkpb/AaQQz0fzqjUfmJlhB0j7o0T5o7NDl55U5Z7UdOA==}
+    cpu: [arm64]
+    os: [darwin]
+    hasBin: true
+
+  '@dbx-app/plugin-cli-darwin-x64@0.1.6':
+    resolution: {integrity: sha512-U0gIsEwax00j8QMLK2WM0iTzIqELCmWdSvVXlhXPS1GAE0m3Jk/M95m5lgDTRt0hYdW4UHmIWkHHb2I9k0oUOw==}
+    cpu: [x64]
+    os: [darwin]
+    hasBin: true
+
+  '@dbx-app/plugin-cli-linux-arm64-gnu@0.1.6':
+    resolution: {integrity: sha512-gLuQ5g1g2izsrrNnlbBK5De6mSkq0Vm7tCZ8mQwXbVjbiJ2m7NPi7URjQBFb9zfulsAIxPKIFBV4gMbeJXlqPw==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+    hasBin: true
+
+  '@dbx-app/plugin-cli-linux-x64-gnu@0.1.6':
+    resolution: {integrity: sha512-8W4GQkf1yswkGaqJyhjhz3oPzxWZQV9y41Js3QZWTBUbWk/Pgk24n6gR7ALAbkPaUnRKrZeB7WLVpltf/6icOA==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+    hasBin: true
+
+  '@dbx-app/plugin-cli-win32-arm64@0.1.6':
+    resolution: {integrity: sha512-3iTKi061MuCDs1T+ojn5iyTjAZzGnnl0fuaCTr2o4gc/nn8mwH8RXtL3fJ5cGM/3842lYUD8Sgl3HswWCZYjXw==}
+    cpu: [arm64]
+    os: [win32]
+    hasBin: true
+
+  '@dbx-app/plugin-cli-win32-x64@0.1.6':
+    resolution: {integrity: sha512-3Ep6BNy/FKIJcZYN5QcipLzNHUneqTIRTXIWUe9WHjDaET0v00eqqKrcUj6QJgzbEgfb9Um5FqYSDdTAWaE3xw==}
+    cpu: [x64]
+    os: [win32]
+    hasBin: true
+
+  '@dbx-app/plugin-cli@0.1.6':
+    resolution: {integrity: sha512-tMedwpuGhDNEnHW4oC9j+pt7JFw9jkIxTKwzy5nIoojH+VFxRmPExV06QUM54U805I1W4kFp18YPvO0LTbxfEw==}
+    engines: {node: '>=18.18.0'}
+    hasBin: true
 
   '@electric-sql/pglite@0.5.13':
     resolution: {integrity: sha512-4rZuxK1k07w6sSpJzjMri0B9+HuXuC7V9pxVB51pR0T9KPqXg6TD0mdaEwBA9rkcL4jdht4tGDf/wYzAiGhT7g==}
@@ -196,6 +242,33 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@dbx-app/plugin-cli-darwin-arm64@0.1.6':
+    optional: true
+
+  '@dbx-app/plugin-cli-darwin-x64@0.1.6':
+    optional: true
+
+  '@dbx-app/plugin-cli-linux-arm64-gnu@0.1.6':
+    optional: true
+
+  '@dbx-app/plugin-cli-linux-x64-gnu@0.1.6':
+    optional: true
+
+  '@dbx-app/plugin-cli-win32-arm64@0.1.6':
+    optional: true
+
+  '@dbx-app/plugin-cli-win32-x64@0.1.6':
+    optional: true
+
+  '@dbx-app/plugin-cli@0.1.6':
+    optionalDependencies:
+      '@dbx-app/plugin-cli-darwin-arm64': 0.1.6
+      '@dbx-app/plugin-cli-darwin-x64': 0.1.6
+      '@dbx-app/plugin-cli-linux-arm64-gnu': 0.1.6
+      '@dbx-app/plugin-cli-linux-x64-gnu': 0.1.6
+      '@dbx-app/plugin-cli-win32-arm64': 0.1.6
+      '@dbx-app/plugin-cli-win32-x64': 0.1.6
 
   '@electric-sql/pglite@0.5.13': {}
 

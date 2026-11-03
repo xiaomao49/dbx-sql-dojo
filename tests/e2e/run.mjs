@@ -83,6 +83,7 @@ function check(name, ok, detail = '') {
 
 const browser = await chromium.launch()
 const context = await browser.newContext({ viewport: { width: 1280, height: 980 } })
+await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin })
 
 async function newPage(file) {
   const page = await context.newPage()
@@ -211,7 +212,8 @@ const engineReady = (page) => page.waitForFunction(
   await page.waitForFunction(() => /已导入/.test(document.querySelector('#detail')?.textContent || ''), null, { timeout: 90000 })
   const status = await page.locator('#detail .verdict').first().textContent()
   check('导入只收下可通过验证的题', status.includes('已导入「测试题库」2 题'), status.slice(0, 60))
-  check('0 行答案被拒绝', status.includes('第 3 题'), status.slice(0, 120))
+  const details = await page.locator('#detail .import-details').textContent()
+  check('0 行答案被拒绝', details.includes('第 3 题'), details.slice(0, 120))
 
   const keys = await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('dbx-stub:custom-bank')))
   check('题库按 key 分开存储', keys.includes('dbx-stub:custom-bank-index') && keys.some(k => k.startsWith('dbx-stub:custom-bank:')), keys.join(', '))
@@ -220,6 +222,8 @@ const engineReady = (page) => page.waitForFunction(
   await page.locator('.filters button[data-f="custom"]').click()
   await page.waitForTimeout(300)
   check('自定义分类列出 2 题', await page.locator('#list .qitem').count() === 2)
+  const nos = await page.locator('#list .qitem .no').allTextContents()
+  check('自定义题使用连续编号', nos.join(',') === '01,02', nos.join(','))
 
   await page.locator('#list .qitem').filter({ hasText: '选择题' }).click()
   await page.fill('#detail textarea', 'select id from t order by id;')
@@ -242,6 +246,19 @@ const engineReady = (page) => page.waitForFunction(
   await page.locator('.actions button', { hasText: '检查答案' }).click()
   await waitVerdict('✅')
   check('正确的 DML 被判对', true)
+
+  check('判题结果有 aria-live', await page.locator('#detail .verdict').first().getAttribute('aria-live') === 'polite')
+  check('列表项可键盘聚焦', await page.locator('#list .qitem').first().getAttribute('role') === 'button')
+
+  await page.locator('#list .qitem').filter({ hasText: '选择题' }).click()
+  await page.waitForTimeout(200)
+  check('切回题目保留草稿', (await page.locator('#detail textarea').inputValue()).includes('generate_series'))
+
+  await page.locator('#bank-btn').click()
+  await page.waitForTimeout(200)
+  await page.locator('.bankrow button', { hasText: '导出' }).first().click()
+  await page.waitForFunction(() => /复制到剪贴板|已导出/.test(document.querySelector('#detail')?.textContent || ''), null, { timeout: 10000 })
+  check('导出题库走剪贴板兜底', (await page.locator('#detail').textContent()).includes('复制到剪贴板'))
 
   await page.reload()
   await engineReady(page)
@@ -289,6 +306,78 @@ const engineReady = (page) => page.waitForFunction(
   await page.waitForFunction(() => (document.querySelector('#detail .verdict')?.textContent || '').includes('✅'), null, { timeout: 30000 })
   check('迁移后的题目仍能判题', true)
   check('迁移流程无控制台报错', problems.length === 0, problems.join(' | '))
+  await page.close()
+}
+
+/* ---------- 6. 导入可以中途取消 ---------- */
+{
+  const { page, problems } = await newPage('/wasm.html')
+  await engineReady(page)
+  await page.locator('#bank-btn').click()
+  await page.waitForSelector('textarea[placeholder*="粘贴"]')
+
+  const result = await page.evaluate(async () => {
+    const bank = {
+      schemaVersion: 1,
+      name: '慢题库',
+      questions: Array.from({ length: 20 }, (_, i) => ({
+        title: `慢题 ${i + 1}`,
+        difficulty: 'Easy',
+        setup: 'create table t (id int); insert into t values (1);',
+        answer: 'select id from t;',
+      })),
+    }
+    let checked = 0
+    const parsed = await parseBankText(JSON.stringify(bank), () => { checked += 1 }, () => checked >= 2)
+    return { cancelled: parsed.cancelled === true, kept: parsed.questions.length, checked }
+  })
+  check('导入可以中途取消', result.cancelled && result.kept < 20, JSON.stringify(result))
+  check('管理页保留取消入口', await page.locator('button', { hasText: '取消导入' }).count() === 1)
+  check('取消流程无控制台报错', problems.length === 0, problems.join(' | '))
+  await page.close()
+}
+
+/* ---------- 7. 超限题库在验证前被拒绝 ---------- */
+{
+  const { page, problems } = await newPage('/wasm.html')
+  await engineReady(page)
+  await page.locator('#bank-btn').click()
+  const paste = page.locator('textarea[placeholder*="粘贴"]')
+  await paste.waitFor()
+  const text = fs.readFileSync(path.join(ROOT, 'testdata', 'oversize-sql-bank.json'), 'utf8')
+  await paste.fill(text)
+  await page.locator('button', { hasText: '导入粘贴内容' }).click()
+  await page.waitForFunction(() => /超过宿主单值上限/.test(document.querySelector('#detail')?.textContent || ''), null, { timeout: 20000 })
+  check('超限题库在验证前被拒绝', true)
+  check('超限流程无控制台报错', problems.length === 0, problems.join(' | '))
+  await page.close()
+}
+
+/* ---------- 8. 大文件分块读取 ---------- */
+{
+  const { page, problems } = await newPage('/wasm.html')
+  await engineReady(page)
+  const ok = await page.evaluate(async () => {
+    const text = 'x'.repeat(300000) // 超过 256 KiB 的读取块，会分成两块
+    const bytes = new TextEncoder().encode(text)
+    window.dbxPlugin.capabilities = { ...(window.dbxPlugin.capabilities || {}), fileTransfer: true }
+    window.dbxPlugin.fileTransfer = {
+      read: async (handleId, offset, size) => {
+        const slice = bytes.slice(offset, offset + size)
+        let bin = ''
+        for (const b of slice) bin += String.fromCharCode(b)
+        return {
+          dataBase64: btoa(bin),
+          length: slice.length,
+          eof: offset + slice.length >= bytes.length,
+        }
+      },
+      cancel: async () => {},
+    }
+    return (await readTextFile('h')) === text
+  })
+  check('大文件分块读取完整', ok)
+  check('分块读取无控制台报错', problems.length === 0, problems.join(' | '))
   await page.close()
 }
 

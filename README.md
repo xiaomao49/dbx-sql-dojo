@@ -11,10 +11,11 @@
 3. 导入 `.dbxp`（插件中心 → 安装 / 导入本地包）
 4. 插件中心 → 已安装，打开「SQL 练习场」
 
-修改代码后重新打包（CLI 版本与发布工作流保持一致）：
+修改代码后重新打包（CLI 版本锁定在 `package.json`，与发布工作流一致）：
 
 ```
-npx @dbx-app/plugin-cli@0.1.6 package . --target universal
+pnpm install
+pnpm package
 ```
 
 ## 功能
