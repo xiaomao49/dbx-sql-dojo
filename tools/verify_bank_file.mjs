@@ -32,20 +32,17 @@ for (let i = 0; i < data.questions.length; i++) {
     await db.exec('drop schema public cascade; create schema public;')
     await db.exec(q.setup)
 
-    const body = q.answer.replace(/\/\*[\s\S]*?\*\//g, '').trim()
-    const isDml = /^(delete|update|insert)\b/i.test(body)
+    // 与插件一致：有结果集就是 select，没有就是 DML（不再靠首关键字猜）。
+    const r = await db.query(q.answer)
+    const cols = (r.fields || []).map(f => f.name)
 
-    if (isDml) {
-      await db.exec(q.answer)
+    if (cols.length) {
+      if (!r.rows.length) throw new Error('标准答案返回 0 行，检查数据或过滤条件')
+      msg = `通过（${r.rows.length} 行 × ${cols.length} 列）`
+    } else {
       const tables = (await db.query(`select tablename from pg_tables where schemaname='public'`)).rows
       if (!tables.length) throw new Error('执行后没有表')
       msg = '通过（DML）'
-    } else {
-      const r = await db.query(q.answer)
-      const cols = (r.fields || []).map(f => f.name)
-      if (!cols.length) throw new Error('标准答案没有返回结果集')
-      if (!r.rows.length) throw new Error('标准答案返回 0 行，检查数据或过滤条件')
-      msg = `通过（${r.rows.length} 行 × ${cols.length} 列）`
     }
   } catch (e) {
     status = 'fail'

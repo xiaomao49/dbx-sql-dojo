@@ -1,6 +1,13 @@
 /* SQL 练习场 — DBX frontend plugin (PostgreSQL 18.6 via PGlite) */
 const PROGRESS_KEY = 'progress';
-const BANK_KEY = 'custom-banks';
+const BANK_KEY = 'custom-banks'; // v1 旧键，启动时迁移到分库存储
+const BANK_INDEX_KEY = 'custom-bank-index';
+const BANK_ITEM_PREFIX = 'custom-bank:';
+/* 宿主限制：单值 256 KiB、全库 1 MiB。各留一点余量给 JSON 包装和索引。 */
+const MAX_BANK_BYTES = 240 * 1024;
+const MAX_TOTAL_BYTES = 1008 * 1024;
+/* 单次查询最多取回 20000 行，避免用户写出笛卡尔积把引擎和界面一起拖死。 */
+const MAX_RESULT_ROWS = 20000;
 
 const state = {
   bank: [],
@@ -15,6 +22,7 @@ const state = {
 
 let pg = null;
 let engineNotice = '';
+let engineStatus = 'loading'; // loading | ready | blocked | error
 
 /* ---------- storage ----------
  * 沙箱是 opaque origin，localStorage 在里面会直接抛 SecurityError，进度必须走
@@ -103,6 +111,13 @@ function sameColumns(a, b) {
   return a.length === b.length && a.every((c, i) => String(c).toLowerCase() === String(b[i]).toLowerCase());
 }
 
+function sameColumnSet(a, b) {
+  if (a.length !== b.length) return false;
+  const A = a.map(c => String(c).toLowerCase()).sort();
+  const B = b.map(c => String(c).toLowerCase()).sort();
+  return A.every((c, i) => c === B[i]);
+}
+
 function sameRows(a, b) {
   if (a.length !== b.length) return false;
   const A = a.map(rowKey).sort();
@@ -176,15 +191,65 @@ async function engineLabel(db) {
   }
 }
 
+/* 引擎在后台启动，失败时才在详情页顶部补一条说明；首屏不再等 3-5 秒。 */
+function renderEngineBanner(main) {
+  if (!main) return;
+  const old = main.querySelector('.engine-banner');
+  if (old) old.remove();
+  if (engineNotice) main.prepend(el('div', { class: 'verdict bad show engine-banner', text: engineNotice }));
+}
+
+async function startEngine() {
+  if (!(await wasmAllowed())) {
+    engineStatus = 'blocked';
+    engineNotice = WASM_BLOCKED_MSG;
+    renderEngineBanner(document.getElementById('detail'));
+    return;
+  }
+  try {
+    const db = await initEngine();
+    pg = db;
+    engineStatus = 'ready';
+    engineNotice = '';
+    const badge = document.getElementById('engine');
+    if (badge) badge.textContent = await engineLabel(db);
+    renderEngineBanner(document.getElementById('detail'));
+  } catch (e) {
+    engineStatus = 'error';
+    engineNotice = e.message || String(e);
+    renderEngineBanner(document.getElementById('detail'));
+  }
+}
+
 async function resetAndSetup(q) {
   await pg.exec('drop schema if exists public cascade; create schema public;');
   await pg.exec(q.setup);
 }
 
+function stripTrailingSemicolon(sql) {
+  return String(sql).trim().replace(/;+\s*$/, '');
+}
+
+/* 包一层 LIMIT，让 PostgreSQL 只回传上限行数；否则大结果集会先全部物化到
+ * wasm 内存里。PGlite 是单线程，statement_timeout 在 wasm 里不生效，这是目前
+ * 唯一能挡住「一次查询撑爆界面」的手段。 */
 async function runSql(sql) {
-  const r = await pg.query(sql);
+  const body = stripTrailingSemicolon(sql);
+  let r;
+  try {
+    r = await pg.query(`select * from (\n${body}\n) as __dojo_result limit ${MAX_RESULT_ROWS + 1}`);
+  } catch (_) {
+    // 子查询包不住的写法（例如误把 DML 写进 select 题）回退到直接执行，
+    // 让调用方按原来的错误路径处理。
+    r = await pg.query(body);
+  }
   const cols = (r.fields || []).map(f => f.name);
-  return { columns: cols, values: r.rows.map(row => cols.map(c => row[c])) };
+  const truncated = r.rows.length > MAX_RESULT_ROWS;
+  return {
+    columns: cols,
+    values: r.rows.slice(0, MAX_RESULT_ROWS).map(row => cols.map(c => row[c])),
+    truncated,
+  };
 }
 
 async function dumpTables() {
@@ -192,6 +257,10 @@ async function dumpTables() {
   const out = [];
   for (const row of t.rows) {
     const name = row.tablename;
+    const count = await pg.query(`select count(*)::int as n from "${name}"`);
+    if (count.rows[0].n > MAX_RESULT_ROWS) {
+      throw new Error(`表 ${name} 有 ${count.rows[0].n} 行，超过单次比较上限 ${MAX_RESULT_ROWS} 行。`);
+    }
     const r = await pg.query(`select * from "${name}"`);
     const cols = (r.fields || []).map(f => f.name);
     out.push({ table: name, columns: cols, values: r.rows.map(x => cols.map(c => x[c])) });
@@ -210,6 +279,10 @@ async function check(q, userSql) {
     return { ok: false, msg: `SQL 执行出错：${(e.message || e).split('\n')[0]}` };
   }
 
+  if (userOut.truncated) {
+    return { ok: false, msg: `结果超过 ${MAX_RESULT_ROWS} 行，无法比较，请加上 LIMIT 或缩小查询范围。` };
+  }
+
   let ansOut;
   try {
     await resetAndSetup(q);
@@ -219,9 +292,19 @@ async function check(q, userSql) {
     return { ok: false, msg: `标准答案执行失败（插件问题）：${(e.message || e).split('\n')[0]}` };
   }
 
+  if (ansOut.truncated) {
+    return { ok: false, msg: `标准答案返回超过 ${MAX_RESULT_ROWS} 行（插件问题）。` };
+  }
+
   if (q.type === 'dml') {
     if (userOut.length !== ansOut.length) return { ok: false, msg: '表数量不一致。' };
     for (let i = 0; i < ansOut.length; i++) {
+      if (String(userOut[i].table).toLowerCase() !== String(ansOut[i].table).toLowerCase()) {
+        return { ok: false, msg: `表名不一致：期望 ${ansOut[i].table}，实际 ${userOut[i].table}。` };
+      }
+      if (!sameColumnSet(userOut[i].columns, ansOut[i].columns)) {
+        return { ok: false, msg: `表 ${ansOut[i].table} 的列不一致：期望 ${ansOut[i].columns.join(', ')}，实际 ${userOut[i].columns.join(', ')}。` };
+      }
       if (!sameRows(userOut[i].values, ansOut[i].values)) {
         return { ok: false, msg: `表 ${ansOut[i].table} 的内容和预期不一致。` };
       }
@@ -281,12 +364,39 @@ async function saveTextFile(name, text) {
   return true;
 }
 
+function utf8Bytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+function formatKb(bytes) {
+  return `${Math.ceil(bytes / 1024)} KiB`;
+}
+
+/* 每个题库单独一个 key：宿主只保证单值 256 KiB，全部塞进一个 key 时稍大的题库
+ * 会在写入阶段才失败，用户只能看到一句「保存失败」。v1 的单 key 数据在启动时迁移。 */
 async function loadCustomBanks() {
   const storage = uiStorage();
   if (!storage) return [];
   try {
-    const v = await storage.get(BANK_KEY);
-    if (v && Array.isArray(v.banks)) return v.banks;
+    const index = await storage.get(BANK_INDEX_KEY);
+    if (index && Array.isArray(index.ids)) {
+      const banks = [];
+      for (const id of index.ids) {
+        const bank = await storage.get(BANK_ITEM_PREFIX + id);
+        if (bank && Array.isArray(bank.questions)) banks.push(bank);
+      }
+      return banks;
+    }
+  } catch (_) { /* fall through to v1 migration */ }
+  try {
+    const legacy = await storage.get(BANK_KEY);
+    if (legacy && Array.isArray(legacy.banks) && legacy.banks.length) {
+      try {
+        await saveCustomBanks(legacy.banks);
+        if (storage.delete) await storage.delete(BANK_KEY);
+      } catch (_) { /* 迁移失败就先继续用旧数据 */ }
+      return legacy.banks;
+    }
   } catch (_) { /* ignore */ }
   return [];
 }
@@ -294,7 +404,22 @@ async function loadCustomBanks() {
 async function saveCustomBanks(banks) {
   const storage = uiStorage();
   if (!storage) throw new Error('宿主没有提供存储能力，无法保存题库');
-  await storage.set(BANK_KEY, { schemaVersion: 1, banks });
+  const previous = new Set(state.customBanks.map(b => b.id));
+  const next = new Set(banks.map(b => b.id));
+  try {
+    // 先写题目，最后写索引；中途失败时旧索引仍然有效，不会指向不存在的库。
+    for (const bank of banks) await storage.set(BANK_ITEM_PREFIX + bank.id, bank);
+    if (storage.delete) {
+      for (const id of previous) if (!next.has(id)) await storage.delete(BANK_ITEM_PREFIX + id);
+    }
+    await storage.set(BANK_INDEX_KEY, { schemaVersion: 2, ids: banks.map(b => b.id) });
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/quota|limit|size|large|exceed|full/i.test(msg)) {
+      throw new Error(`题库超出宿主存储上限（单题库 ${formatKb(MAX_BANK_BYTES)}、全库 ${formatKb(MAX_TOTAL_BYTES)}）。请删除不需要的题库，或拆成多个文件导入。`);
+    }
+    throw e;
+  }
   state.customBanks = banks;
 }
 
@@ -325,7 +450,6 @@ function normalizeQuestion(raw, index) {
   if (!answer) return { error: `第 ${no} 题缺少 answer` };
   if (setup.length > 20000) return { error: `第 ${no} 题 setup 超过 20 KB` };
   if (answer.length > 20000) return { error: `第 ${no} 题 answer 超过 20 KB` };
-  const body = answer.replace(/\/\*[\s\S]*?\*\//g, '').trim();
   return {
     q: {
       title,
@@ -335,28 +459,28 @@ function normalizeQuestion(raw, index) {
       hint: String(raw.hint || '').trim(),
       setup,
       answer,
-      type: /^(delete|update|insert)\b/i.test(body) ? 'dml' : 'select',
+      type: null, // 由 validateQuestion 按实际执行结果判断，避免 WITH/行注释误判
       lcId: null,
     },
   };
 }
 
+/* 类型不再靠正则猜：执行标准答案，有结果集就是 select，没有就是 DML。
+ * 这样 WITH ... UPDATE、以 -- 注释开头的答案也能判对。 */
 async function validateQuestion(q) {
   if (!pg) return { ok: false, msg: '数据库引擎没启动，无法验证（需要 DBX 支持 WebAssembly）' };
   try {
     await pg.exec('drop schema if exists public cascade; create schema public;');
     await pg.exec(q.setup);
-    if (q.type === 'dml') {
-      await pg.exec(q.answer);
-      const tables = await dumpTables();
-      if (!tables.length) return { ok: false, msg: '执行后没有表' };
-      return { ok: true, msg: '通过（DML）' };
-    }
     const r = await pg.query(q.answer);
     const cols = (r.fields || []).map(f => f.name);
-    if (!cols.length) return { ok: false, msg: '标准答案没有返回结果集' };
-    if (!r.rows.length) return { ok: false, msg: '标准答案返回 0 行，检查数据或过滤条件' };
-    return { ok: true, msg: `通过（${r.rows.length} 行 × ${cols.length} 列）` };
+    if (cols.length) {
+      if (!r.rows.length) return { ok: false, msg: '标准答案返回 0 行，检查数据或过滤条件' };
+      return { ok: true, type: 'select', msg: `通过（${r.rows.length} 行 × ${cols.length} 列）` };
+    }
+    const tables = await dumpTables();
+    if (!tables.length) return { ok: false, msg: '执行后没有表' };
+    return { ok: true, type: 'dml', msg: '通过（DML）' };
   } catch (e) {
     return { ok: false, msg: (e.message || String(e)).split('\n')[0] };
   }
@@ -372,18 +496,36 @@ async function parseBankText(text, onProgress) {
 
   const name = String(data.name || '').trim() || '未命名题库';
   const results = [];
-  const questions = [];
+  const normalized = [];
   for (let i = 0; i < data.questions.length; i++) {
     const n = normalizeQuestion(data.questions[i], i);
     if (n.error) {
       results.push({ no: i + 1, title: String(data.questions[i]?.title || ''), ok: false, msg: n.error });
     } else {
-      const v = await validateQuestion(n.q);
-      results.push({ no: i + 1, title: n.q.title, ok: v.ok, msg: v.msg });
-      if (v.ok) questions.push(n.q);
+      normalized.push({ no: i + 1, q: n.q });
     }
-    if (onProgress) onProgress(i + 1, data.questions.length);
   }
+
+  // 先按序列化体积估算，超过宿主单值上限就不必逐题跑引擎了。
+  const estimate = utf8Bytes({
+    id: 'b0000000000',
+    name,
+    importedAt: new Date().toISOString(),
+    questions: normalized.map(x => ({ ...x.q, id: 'c0000' })),
+  });
+  if (estimate > MAX_BANK_BYTES) {
+    return { error: `题库「${name}」约 ${formatKb(estimate)}，超过宿主单值上限 ${formatKb(MAX_BANK_BYTES)}，请拆成多个文件分别导入。` };
+  }
+
+  const questions = [];
+  for (let i = 0; i < normalized.length; i++) {
+    const { no, q } = normalized[i];
+    const v = await validateQuestion(q);
+    results.push({ no, title: q.title, ok: v.ok, msg: v.msg });
+    if (v.ok) questions.push({ ...q, type: v.type });
+    if (onProgress) onProgress(i + 1, normalized.length);
+  }
+  results.sort((a, b) => a.no - b.no);
   return { name, questions, results };
 }
 
@@ -391,12 +533,21 @@ async function addCustomBank(name, questions) {
   const banks = [...state.customBanks];
   const start = nextCustomSeq(banks);
   const withIds = questions.map((q, i) => ({ ...q, id: `c${start + i}` }));
-  banks.push({
+  const bank = {
     id: 'b' + Date.now().toString(36),
     name,
     importedAt: new Date().toISOString(),
     questions: withIds,
-  });
+  };
+  const bankBytes = utf8Bytes(bank);
+  if (bankBytes > MAX_BANK_BYTES) {
+    throw new Error(`题库「${name}」约 ${formatKb(bankBytes)}，超过宿主单值上限 ${formatKb(MAX_BANK_BYTES)}，请拆成多个文件分别导入。`);
+  }
+  const totalBytes = banks.reduce((sum, b) => sum + utf8Bytes(b), bankBytes);
+  if (totalBytes > MAX_TOTAL_BYTES) {
+    throw new Error(`导入后题库总量约 ${formatKb(totalBytes)}，超过宿主全库上限 ${formatKb(MAX_TOTAL_BYTES)}，请先删除不需要的题库。`);
+  }
+  banks.push(bank);
   await saveCustomBanks(banks);
   rebuildBank();
 }
@@ -479,7 +630,7 @@ function renderCustomEmpty() {
   state.currentId = null;
   const main = document.getElementById('detail');
   main.innerHTML = '';
-  if (engineNotice) main.append(el('div', { class: 'verdict bad show', text: engineNotice }));
+  renderEngineBanner(main);
   main.append(el('div', { class: 'qhead' }, el('h2', { text: '自定义题库' })));
   main.append(el('p', {
     class: 'desc',
@@ -527,7 +678,7 @@ function openQuestion(id) {
 
   const main = document.getElementById('detail');
   main.innerHTML = '';
-  if (engineNotice) main.append(el('div', { class: 'verdict bad show', text: engineNotice }));
+  renderEngineBanner(main);
 
   const head = el('div', { class: 'qhead' },
     el('h2', { text: q.title }),
@@ -579,8 +730,10 @@ function openQuestion(id) {
 
   async function run(compare) {
     if (!pg) {
-      verdict.className = 'verdict bad show';
-      verdict.textContent = engineNotice || '数据库引擎没有启动，暂时无法运行 SQL。';
+      verdict.className = engineStatus === 'loading' ? 'verdict info show' : 'verdict bad show';
+      verdict.textContent = engineStatus === 'loading'
+        ? '数据库引擎正在启动（首次约 3-5 秒），请稍候再试。'
+        : (engineNotice || '数据库引擎没有启动，暂时无法运行 SQL。');
       return;
     }
     const sql = editor.value.trim();
@@ -596,6 +749,10 @@ function openQuestion(id) {
       } else {
         const r = await runSql(sql);
         renderResult(resultWrap, r.columns, r.values);
+        if (r.truncated) {
+          verdict.className = 'verdict info show';
+          verdict.textContent = `结果超过 ${MAX_RESULT_ROWS} 行，只显示前 ${MAX_RESULT_ROWS} 行。`;
+        }
       }
 
       if (compare) {
@@ -828,7 +985,7 @@ async function loadBank() {
 
 async function boot() {
   const main = document.getElementById('detail');
-  main.innerHTML = '<div class="loading">正在启动 PostgreSQL 引擎（首次约 3-5 秒）…</div>';
+  main.innerHTML = '<div class="loading">正在加载题库…</div>';
   try {
     state.builtin = await loadBank();
     state.customBanks = await loadCustomBanks();
@@ -836,20 +993,10 @@ async function boot() {
     bindHeader();
     await loadProgress();
     renderList();
-    if (await wasmAllowed()) {
-      try {
-        pg = await initEngine();
-        const badge = document.getElementById('engine');
-        if (badge) badge.textContent = await engineLabel(pg);
-      } catch (e) {
-        engineNotice = e.message || String(e);
-      }
-    } else {
-      engineNotice = WASM_BLOCKED_MSG;
-    }
-    // 引擎起不来也照样能浏览题库、看提示，只是不能运行 SQL。
+    // 先渲染题目，引擎在后台启动；首屏不用等 3-5 秒。
     const first = state.bank.find(q => !state.done.has(q.id)) || state.bank[0];
     openQuestion(first.id);
+    void startEngine();
   } catch (e) {
     main.innerHTML = '';
     main.append(el('div', { class: 'verdict bad show', text: `初始化失败：${e.message}` }));

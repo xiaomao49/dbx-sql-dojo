@@ -3,7 +3,9 @@
  *
  *   1. 宿主 CSP（无 'wasm-unsafe-eval'）→ 必须给出中文说明，题库仍可浏览，且不加载 4 MB 引擎；
  *   2. 宿主 CSP + 'wasm-unsafe-eval'  → 引擎启动、版本徽标、判题、进度持久化、刷新后打开下一题；
- *   3. 宿主没有 storage 能力           → 进度降级为「本次会话有效」，刷新后归零。
+ *   3. 宿主没有 storage 能力           → 进度降级为「本次会话有效」，刷新后归零；
+ *   4. 自定义题库导入                   → 分库存储、按结果集推断 select/DML、超大结果集拦截；
+ *   5. v1 单键题库                      → 启动时自动迁移到分库存储，迁移后仍能判题。
  *
  * 用法：pnpm test:e2e（首次需要 npx playwright install chromium）
  */
@@ -168,6 +170,125 @@ const engineReady = (page) => page.waitForFunction(
   await page.waitForTimeout(600)
   check('无存储能力时刷新后归零', (await page.locator('#progress').textContent()).includes('0/50'))
   check('无存储能力时无控制台报错', problems.length === 0, problems.join(' | '))
+  await page.close()
+}
+
+/* ---------- 4. 自定义题库：分库存储、类型推断、结果上限 ---------- */
+{
+  const { page, problems } = await newPage('/wasm.html')
+  await engineReady(page)
+
+  const waitVerdict = (text, timeout = 30000) => page.waitForFunction(
+    t => (document.querySelector('#detail .verdict')?.textContent || '').includes(t), text, { timeout })
+
+  await page.locator('#bank-btn').click()
+  const paste = page.locator('textarea[placeholder*="粘贴"]')
+  await paste.waitFor()
+
+  const bank = {
+    schemaVersion: 1,
+    name: '测试题库',
+    questions: [
+      {
+        title: '选择题', desc: '按 id 排序', difficulty: 'Easy',
+        setup: 'create table t (id int); insert into t values (2),(1);',
+        answer: '-- 注释开头也要能识别\nselect id from t order by id;',
+      },
+      {
+        title: '更新题', desc: '把 id=1 的 v 改成 1', difficulty: 'Medium',
+        setup: 'create table t (id int, v int); insert into t values (1,0),(2,0);',
+        answer: '-- 注释开头\nwith x as (select 1 as id) update t set v = 1 where id in (select id from x);',
+      },
+      {
+        title: '空结果题', desc: '故意返回 0 行', difficulty: 'Easy',
+        setup: 'create table t (id int);',
+        answer: 'select id from t;',
+      },
+    ],
+  }
+  await paste.fill(JSON.stringify(bank))
+  await page.locator('button', { hasText: '导入粘贴内容' }).click()
+  await page.waitForFunction(() => /已导入/.test(document.querySelector('#detail')?.textContent || ''), null, { timeout: 90000 })
+  const status = await page.locator('#detail .verdict').first().textContent()
+  check('导入只收下可通过验证的题', status.includes('已导入「测试题库」2 题'), status.slice(0, 60))
+  check('0 行答案被拒绝', status.includes('第 3 题'), status.slice(0, 120))
+
+  const keys = await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('dbx-stub:custom-bank')))
+  check('题库按 key 分开存储', keys.includes('dbx-stub:custom-bank-index') && keys.some(k => k.startsWith('dbx-stub:custom-bank:')), keys.join(', '))
+  check('不再写 v1 单键', !(await page.evaluate(() => localStorage.getItem('dbx-stub:custom-banks'))))
+
+  await page.locator('.filters button[data-f="custom"]').click()
+  await page.waitForTimeout(300)
+  check('自定义分类列出 2 题', await page.locator('#list .qitem').count() === 2)
+
+  await page.locator('#list .qitem').filter({ hasText: '选择题' }).click()
+  await page.fill('#detail textarea', 'select id from t order by id;')
+  await page.locator('.actions button', { hasText: '检查答案' }).click()
+  await waitVerdict('✅')
+  check('注释开头的 select 答案判对', true)
+
+  await page.fill('#detail textarea', 'select g from generate_series(1, 20001) g;')
+  await page.locator('.actions button', { hasText: '检查答案' }).click()
+  await waitVerdict('超过 20000 行')
+  check('超大结果集被拒', true)
+
+  await page.locator('#list .qitem').filter({ hasText: '更新题' }).click()
+  await page.fill('#detail textarea', 'update t set v = 2;')
+  await page.locator('.actions button', { hasText: '检查答案' }).click()
+  await waitVerdict('❌')
+  check('错误的 DML 被判错', true)
+
+  await page.fill('#detail textarea', 'update t set v = 1 where id = 1;')
+  await page.locator('.actions button', { hasText: '检查答案' }).click()
+  await waitVerdict('✅')
+  check('正确的 DML 被判对', true)
+
+  await page.reload()
+  await engineReady(page)
+  await page.locator('.filters button[data-f="custom"]').click()
+  await page.waitForTimeout(300)
+  check('刷新后自定义题库仍在', await page.locator('#list .qitem').count() === 2)
+
+  check('自定义题库流程无控制台报错', problems.length === 0, problems.join(' | '))
+  await page.close()
+}
+
+/* ---------- 5. v1 单键题库自动迁移 ---------- */
+{
+  const page = await context.newPage()
+  const problems = []
+  page.on('pageerror', e => problems.push(String(e.message).slice(0, 200)))
+  await page.goto(origin + '/wasm.html')
+  await page.evaluate(() => {
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith('dbx-stub:custom-bank')) localStorage.removeItem(k)
+    }
+    localStorage.setItem('dbx-stub:custom-banks', JSON.stringify({
+      schemaVersion: 1,
+      banks: [{
+        id: 'b1', name: '旧题库', importedAt: new Date().toISOString(),
+        questions: [{
+          id: 'c1', title: '旧题', desc: '', difficulty: 'Easy', hint: '',
+          setup: 'create table t (id int); insert into t values (1);',
+          answer: 'select id from t;', type: 'select',
+        }],
+      }],
+    }))
+  })
+  await page.reload()
+  await engineReady(page)
+  await page.locator('.filters button[data-f="custom"]').click()
+  await page.waitForTimeout(300)
+  check('v1 题库自动迁移', await page.locator('#list .qitem').count() === 1)
+  check('迁移后改用分库键', await page.evaluate(() => !!localStorage.getItem('dbx-stub:custom-bank-index')))
+  check('迁移后删除旧键', await page.evaluate(() => localStorage.getItem('dbx-stub:custom-banks') === null))
+
+  await page.locator('#list .qitem').first().click()
+  await page.fill('#detail textarea', 'select id from t;')
+  await page.locator('.actions button', { hasText: '检查答案' }).click()
+  await page.waitForFunction(() => (document.querySelector('#detail .verdict')?.textContent || '').includes('✅'), null, { timeout: 30000 })
+  check('迁移后的题目仍能判题', true)
+  check('迁移流程无控制台报错', problems.length === 0, problems.join(' | '))
   await page.close()
 }
 

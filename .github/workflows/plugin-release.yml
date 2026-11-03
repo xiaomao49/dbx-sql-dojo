@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   release:
-    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@plugin-sdk-v1
+    # 固定到 t8y2/dbx main 的具体 commit：此前引用的 plugin-sdk-v1 ref 并不存在，
+    # 导致每次 release run 都是 0 job 的 "workflow file issue"。上游更新后手动 bump SHA。
+    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@6883467654c095a9d325b7d6c99d99e7dea35a02
     with:
       release-tag: ${{ github.event.release.tag_name }}
       package-command: dbx-plugin package .
