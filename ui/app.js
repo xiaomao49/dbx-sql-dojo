@@ -618,7 +618,7 @@ function templateText() {
   return JSON.stringify({
     schemaVersion: 1,
     name: '我的题库',
-    _help: '把 questions 里的题目换成你自己的。setup 用来建表和灌数据，answer 是标准答案。两个都要能在 PostgreSQL 上直接执行，answer 必须能返回至少一行结果。difficulty 只能填 Easy / Medium / Hard。',
+    _help: '把 questions 里的题目换成你自己的。setup 用来建表和灌数据，answer 是标准答案。两个都要能在 PostgreSQL 上直接执行，answer 必须能返回至少一行结果。difficulty 只能填 Easy / Medium / Hard。如果题目要求排序，把 ORDER BY 写在 answer 的最外层，判题会连行顺序一起比较；只写进子查询不会触发顺序检查。',
     questions: [
       {
         title: '统计每个城市的订单数',
