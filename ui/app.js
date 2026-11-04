@@ -135,6 +135,29 @@ function sameRows(a, b) {
   return A.every((x, i) => x === B[i]);
 }
 
+function sameRowsOrdered(a, b) {
+  if (a.length !== b.length) return false;
+  return a.every((row, i) => rowKey(row) === rowKey(b[i]));
+}
+
+/* 标准答案末尾是否有顶层 ORDER BY（括号外的）。有就要求行的顺序一致；
+ * 没有就只比较内容，因为 PostgreSQL 本来就不保证无 ORDER BY 时的输出顺序。 */
+function hasTopLevelOrderBy(sql) {
+  const cleaned = String(sql || '')
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/'(?:[^']|'')*'/g, "''")
+    .replace(/"(?:[^"]|"")*"/g, '""');
+  let depth = 0;
+  let out = '';
+  for (const ch of cleaned) {
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    else if (depth === 0) out += ch;
+  }
+  return /\border\s+by\b/i.test(out);
+}
+
 /* ---------- postgres ---------- */
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -328,7 +351,14 @@ async function check(q, userSql) {
   if (!sameColumns(userOut.columns, ansOut.columns)) {
     return { ok: false, msg: `列不一致：期望 ${ansOut.columns.join(', ')}，实际 ${userOut.columns.join(', ')}。` };
   }
-  if (!sameRows(userOut.values, ansOut.values)) {
+  const ordered = hasTopLevelOrderBy(q.answer);
+  const rowsMatch = ordered
+    ? sameRowsOrdered(userOut.values, ansOut.values)
+    : sameRows(userOut.values, ansOut.values);
+  if (!rowsMatch) {
+    if (sameRows(userOut.values, ansOut.values)) {
+      return { ok: false, msg: '结果内容正确，但行的顺序和标准答案不一致，检查 ORDER BY。' };
+    }
     return { ok: false, msg: `结果不一致：期望 ${ansOut.values.length} 行，你返回了 ${userOut.values.length} 行。` };
   }
   return { ok: true, msg: '通过！结果和标准答案一致。' };

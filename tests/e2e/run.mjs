@@ -231,6 +231,11 @@ const engineReady = (page) => page.waitForFunction(
   await waitVerdict('✅')
   check('注释开头的 select 答案判对', true)
 
+  await page.fill('#detail textarea', 'select id from t order by id desc;')
+  await page.locator('.actions button', { hasText: '检查答案' }).click()
+  await waitVerdict('顺序')
+  check('行顺序不一致被判错', true)
+
   await page.fill('#detail textarea', 'select g from generate_series(1, 20001) g;')
   await page.locator('.actions button', { hasText: '检查答案' }).click()
   await waitVerdict('超过 20000 行')
