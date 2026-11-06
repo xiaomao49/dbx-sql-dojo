@@ -1,5 +1,6 @@
 /* SQL 练习场 — DBX frontend plugin (PostgreSQL 18.6 via PGlite) */
 const PROGRESS_KEY = 'progress';
+const DRAFTS_KEY = 'drafts';
 const BANK_KEY = 'custom-banks'; // v1 旧键，启动时迁移到分库存储
 const BANK_INDEX_KEY = 'custom-bank-index';
 const BANK_ITEM_PREFIX = 'custom-bank:';
@@ -15,6 +16,7 @@ const state = {
   customBanks: [],
   currentId: null,
   filter: 'all',
+  customBankId: null,
   done: new Set(),
   drafts: new Map(),
   showSolution: false,
@@ -39,6 +41,7 @@ async function loadProgress() {
   if (!storage) return;
   try {
     const value = await storage.get(PROGRESS_KEY);
+
     state.persistent = true;
     if (Array.isArray(value)) {
       state.done = new Set(value.filter(n => Number.isInteger(n) || typeof n === 'string'));
@@ -58,6 +61,42 @@ async function saveProgress() {
     state.persistent = false;
   }
   renderProgress();
+}
+
+async function loadDrafts() {
+  const storage = uiStorage();
+  if (!storage) return;
+  try {
+    const value = await storage.get(DRAFTS_KEY);
+    if (value && typeof value === 'object') {
+      for (const [id, text] of Object.entries(value)) {
+        if (typeof text === 'string' && text) state.drafts.set(id, text);
+      }
+    }
+  } catch (_) { /* 草稿不是关键数据 */ }
+}
+
+/* 每次输入后写一次宿主存储。总大小超过 200 KiB 时放弃剩余草稿，避免撑爆单值上限。 */
+let draftSaveQueued = false;
+
+function scheduleSaveDrafts() {
+  const storage = uiStorage();
+  if (!storage || draftSaveQueued) return;
+  draftSaveQueued = true;
+  queueMicrotask(() => {
+    draftSaveQueued = false;
+    const entries = {};
+    let total = 0;
+    for (const [id, text] of state.drafts) {
+      const value = String(text);
+      if (!value) continue;
+      const size = utf8Bytes(value);
+      if (total + size > 200 * 1024) break;
+      entries[String(id)] = value;
+      total += size;
+    }
+    storage.set(DRAFTS_KEY, entries).catch(() => { /* 超限时放弃草稿 */ });
+  });
 }
 
 function renderProgress() {
@@ -475,8 +514,27 @@ async function saveCustomBanks(banks) {
 }
 
 function rebuildBank() {
-  const custom = state.customBanks.flatMap(b => b.questions || []);
+  const custom = state.customBanks.flatMap(b => (b.questions || []).map(q => ({ ...q, bankId: b.id })));
   state.bank = [...state.builtin, ...custom];
+  renderCustomBankOptions();
+}
+
+/* 顶部「自定义」下拉：列出导入的每个题库集，选中后只看那一集。 */
+function renderCustomBankOptions() {
+  const select = document.getElementById('custom-bank');
+  if (!select) return;
+  if (state.customBankId && !state.customBanks.some(b => b.id === state.customBankId)) {
+    state.customBankId = null;
+  }
+  select.innerHTML = '';
+  select.append(el('option', { value: '', text: '自定义（全部）' }));
+  for (const b of state.customBanks) {
+    select.append(el('option', {
+      value: b.id,
+      text: `${b.name}（${(b.questions || []).length} 题）`,
+    }));
+  }
+  select.value = state.customBankId || '';
 }
 
 function nextCustomSeq(banks) {
@@ -669,13 +727,17 @@ async function saveOrCopy(name, text) {
     await navigator.clipboard.writeText(text);
     return 'clipboard';
   }
-  return (await saveTextFile(name, text)) ? 'file' : '';
+  return (await saveTextFile(name, text)) ? 'file' : 'cancelled';
 }
 
 /* ---------- render ---------- */
-const isCustomQuestion = q => /^c\d+$/.test(String(q.id));function matchFilter(q, f) {
+const isCustomQuestion = q => /^c\d+$/.test(String(q.id));
+
+function matchFilter(q, f) {
   if (f === 'all') return true;
-  if (f === 'custom') return isCustomQuestion(q);
+  if (f === 'custom') {
+    return isCustomQuestion(q) && (!state.customBankId || q.bankId === state.customBankId);
+  }
   return q.difficulty === f;
 }
 
@@ -799,8 +861,11 @@ function openQuestion(id) {
     placeholder: '在此输入 SQL 语句，按 Ctrl+Enter 执行检查',
     'aria-label': 'SQL 编辑器',
   });
-  editor.value = state.drafts.get(q.id) || '';
-  editor.addEventListener('input', () => state.drafts.set(q.id, editor.value));
+  editor.value = state.drafts.get(String(q.id)) || '';
+  editor.addEventListener('input', () => {
+    state.drafts.set(String(q.id), editor.value);
+    scheduleSaveDrafts();
+  });
 
   const verdict = el('div', { class: 'verdict', role: 'status', 'aria-live': 'polite' });
   const resultWrap = el('div', { class: 'result', 'aria-label': '查询结果' });
@@ -880,7 +945,8 @@ function openQuestion(id) {
   });
   resetBtn.addEventListener('click', () => {
     editor.value = '';
-    state.drafts.delete(q.id);
+    state.drafts.delete(String(q.id));
+    scheduleSaveDrafts();
     verdict.className = 'verdict';
     resultWrap.innerHTML = '';
     state.done.delete(q.id);
@@ -918,7 +984,26 @@ function openBankManager() {
     else renderCustomEmpty();
   });
 
-  main.append(el('div', { class: 'qhead' }, el('h2', { text: '题库管理' }), back));
+  const resetAllBtn = el('button', { class: 'btn', text: '重置全部进度' });
+  let resetArmed = false;
+  resetAllBtn.addEventListener('click', async () => {
+    if (!resetArmed) {
+      resetArmed = true;
+      resetAllBtn.textContent = '确定重置全部？';
+      setTimeout(() => { resetArmed = false; resetAllBtn.textContent = '重置全部进度'; }, 4000);
+      return;
+    }
+    resetArmed = false;
+    resetAllBtn.textContent = '重置全部进度';
+    state.done.clear();
+    state.drafts.clear();
+    await saveProgress();
+    scheduleSaveDrafts();
+    renderList();
+    setStatus('ok', '已重置全部做题进度和草稿。');
+  });
+
+  main.append(el('div', { class: 'qhead' }, el('h2', { text: '题库管理' }), back, resetAllBtn));
 
   main.append(el('p', {
     class: 'desc',
@@ -1021,6 +1106,7 @@ function openBankManager() {
     try {
       const ok = await saveTextFile('sql-dojo-template.json', text);
       if (ok) setStatus('ok', '模板已保存为 sql-dojo-template.json。');
+      else setStatus('info', '已取消保存。');
     } catch (e) {
       setStatus('bad', `保存失败：${formatPgError(e)}`);
     }
@@ -1054,6 +1140,7 @@ function openBankManager() {
     if (!state.customBanks.length) { setStatus('info', '还没有可导出的自定义题库。'); return; }
     try {
       const how = await saveOrCopy('sql-dojo-banks.json', bankExportText(state.customBanks));
+      if (how === 'cancelled') { setStatus('info', '已取消导出。'); return; }
       setStatus('ok', how === 'clipboard' ? '宿主不支持保存文件，已把全部题库复制到剪贴板。' : '已导出全部题库。');
     } catch (e) {
       setStatus('bad', `导出失败：${formatPgError(e)}`);
@@ -1079,6 +1166,7 @@ function openBankManager() {
       exportBtn.addEventListener('click', async () => {
         try {
           const how = await saveOrCopy(`${safeFileName(b.name)}.json`, bankExportText([b]));
+          if (how === 'cancelled') { setStatus('info', '已取消导出。'); return; }
           setStatus('ok', how === 'clipboard' ? `宿主不支持保存文件，已把「${b.name}」复制到剪贴板。` : `已导出「${b.name}」。`);
         } catch (e) {
           setStatus('bad', `导出失败：${formatPgError(e)}`);
@@ -1123,20 +1211,41 @@ function openBankManager() {
 
 /* ---------- boot ---------- */
 function bindHeader() {
-  document.querySelectorAll('.filters button').forEach(btn => {
+  const buttons = () => document.querySelectorAll('.filters button');
+  const customSelect = document.getElementById('custom-bank');
+
+  const showFirst = () => {
+    renderList();
+    const pool = state.bank.filter(q => matchFilter(q, state.filter));
+    if (!pool.length) {
+      if (state.filter === 'custom') renderCustomEmpty();
+      return;
+    }
+    if (!pool.some(q => q.id === state.currentId)) {
+      const first = pool.find(q => !state.done.has(q.id)) || pool[0];
+      openQuestion(first.id);
+    }
+  };
+
+  buttons().forEach(btn => {
     btn.addEventListener('click', () => {
       state.filter = btn.dataset.f;
-      document.querySelectorAll('.filters button').forEach(b => b.classList.toggle('active', b === btn));
-      renderList();
-      const pool = state.bank.filter(q => matchFilter(q, state.filter));
-      if (!pool.length) {
-        if (state.filter === 'custom') renderCustomEmpty();
-      } else if (!pool.some(q => q.id === state.currentId)) {
-        const first = pool.find(q => !state.done.has(q.id)) || pool[0];
-        openQuestion(first.id);
-      }
+      state.customBankId = null;
+      buttons().forEach(b => b.classList.toggle('active', b === btn));
+      if (customSelect) customSelect.value = '';
+      showFirst();
     });
   });
+
+  if (customSelect) {
+    customSelect.addEventListener('change', () => {
+      state.filter = 'custom';
+      state.customBankId = customSelect.value || null;
+      buttons().forEach(b => b.classList.remove('active'));
+      showFirst();
+    });
+  }
+
   const bankBtn = document.getElementById('bank-btn');
   if (bankBtn) bankBtn.addEventListener('click', openBankManager);
 }
@@ -1157,6 +1266,7 @@ async function boot() {
     rebuildBank();
     bindHeader();
     await loadProgress();
+    await loadDrafts();
     renderList();
     // 先渲染题目，引擎在后台启动；首屏不用等 3-5 秒。
     const first = state.bank.find(q => !state.done.has(q.id)) || state.bank[0];

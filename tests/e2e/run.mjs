@@ -219,11 +219,18 @@ const engineReady = (page) => page.waitForFunction(
   check('题库按 key 分开存储', keys.includes('dbx-stub:custom-bank-index') && keys.some(k => k.startsWith('dbx-stub:custom-bank:')), keys.join(', '))
   check('不再写 v1 单键', !(await page.evaluate(() => localStorage.getItem('dbx-stub:custom-banks'))))
 
-  await page.locator('.filters button[data-f="custom"]').click()
+  await page.selectOption('#custom-bank', '')
   await page.waitForTimeout(300)
   check('自定义分类列出 2 题', await page.locator('#list .qitem').count() === 2)
   const nos = await page.locator('#list .qitem .no').allTextContents()
   check('自定义题使用连续编号', nos.join(',') === '01,02', nos.join(','))
+
+  const optionValues = await page.locator('#custom-bank option').evaluateAll(opts => opts.map(o => o.value))
+  check('自定义下拉列出题库集', optionValues.length === 2 && optionValues[0] === '', optionValues.join(','))
+  await page.selectOption('#custom-bank', optionValues[1])
+  await page.waitForTimeout(200)
+  check('按题库集筛选', await page.locator('#list .qitem').count() === 2)
+  await page.selectOption('#custom-bank', '')
 
   await page.locator('#list .qitem').filter({ hasText: '选择题' }).click()
   await page.fill('#detail textarea', 'select id from t order by id;')
@@ -265,11 +272,37 @@ const engineReady = (page) => page.waitForFunction(
   await page.waitForFunction(() => /复制到剪贴板|已导出/.test(document.querySelector('#detail')?.textContent || ''), null, { timeout: 10000 })
   check('导出题库走剪贴板兜底', (await page.locator('#detail').textContent()).includes('复制到剪贴板'))
 
+  await page.evaluate(() => {
+    window.dbxPlugin.capabilities = { ...(window.dbxPlugin.capabilities || {}), fileTransfer: true }
+    window.dbxPlugin.fileTransfer = {
+      beginSave: async () => null,
+      read: async () => ({ dataBase64: '', length: 0, eof: true }),
+      cancel: async () => {},
+      pick: async () => ({ files: [] }),
+    }
+  })
+  await page.locator('.bankrow button', { hasText: '导出' }).first().click()
+  await page.waitForFunction(() => /已取消导出/.test(document.querySelector('#detail')?.textContent || ''), null, { timeout: 10000 })
+  check('取消保存不显示已导出', !(await page.locator('#detail').textContent()).includes('已导出「'))
+
   await page.reload()
   await engineReady(page)
-  await page.locator('.filters button[data-f="custom"]').click()
+  await page.selectOption('#custom-bank', '')
   await page.waitForTimeout(300)
   check('刷新后自定义题库仍在', await page.locator('#list .qitem').count() === 2)
+
+  await page.locator('#list .qitem').filter({ hasText: '选择题' }).click()
+  await page.waitForTimeout(200)
+  const draftValue = await page.locator('#detail textarea').inputValue()
+  const draftsAfter = await page.evaluate(() => localStorage.getItem('dbx-stub:drafts'))
+  check('刷新后草稿仍在', draftValue.includes('generate_series'), `value=${draftValue.slice(0, 40)} drafts=${String(draftsAfter).slice(0, 120)}`)
+
+  await page.locator('#bank-btn').click()
+  await page.waitForTimeout(200)
+  await page.locator('button', { hasText: '重置全部进度' }).click()
+  await page.locator('button', { hasText: '确定重置全部？' }).click()
+  await page.waitForTimeout(400)
+  check('一键重置清空进度', (await page.locator('#progress').textContent()).includes('0/'))
 
   check('自定义题库流程无控制台报错', problems.length === 0, problems.join(' | '))
   await page.close()
@@ -299,7 +332,7 @@ const engineReady = (page) => page.waitForFunction(
   })
   await page.reload()
   await engineReady(page)
-  await page.locator('.filters button[data-f="custom"]').click()
+  await page.selectOption('#custom-bank', '')
   await page.waitForTimeout(300)
   check('v1 题库自动迁移', await page.locator('#list .qitem').count() === 1)
   check('迁移后改用分库键', await page.evaluate(() => !!localStorage.getItem('dbx-stub:custom-bank-index')))

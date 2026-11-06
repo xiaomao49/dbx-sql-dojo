@@ -67,6 +67,19 @@ header h1 { font-size: 14px; margin: 0; font-weight: 650; letter-spacing: .02em;
   border-color: color-mix(in srgb, var(--brand) 35%, transparent);
 }
 
+.bank-select {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 8px;
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+  max-width: 190px;
+}
+
+.bank-select:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+
 .progress { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .engine { color: var(--muted); font-family: var(--mono); font-size: 11px; }
