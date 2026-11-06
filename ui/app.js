@@ -868,7 +868,8 @@ function openQuestion(id) {
   });
 
   const verdict = el('div', { class: 'verdict', role: 'status', 'aria-live': 'polite' });
-  const resultWrap = el('div', { class: 'result', 'aria-label': '查询结果' });
+  const resultWrap = el('div', { class: 'result', 'aria-label': '查询结果' },
+    el('div', { class: 'empty', text: '运行或检查后在这里显示查询结果' }));
   const solutionWrap = el('div', { class: 'solution', style: 'display:none' });
 
   const runBtn = el('button', { class: 'btn', text: '运行' });
@@ -984,26 +985,7 @@ function openBankManager() {
     else renderCustomEmpty();
   });
 
-  const resetAllBtn = el('button', { class: 'btn', text: '重置全部进度' });
-  let resetArmed = false;
-  resetAllBtn.addEventListener('click', async () => {
-    if (!resetArmed) {
-      resetArmed = true;
-      resetAllBtn.textContent = '确定重置全部？';
-      setTimeout(() => { resetArmed = false; resetAllBtn.textContent = '重置全部进度'; }, 4000);
-      return;
-    }
-    resetArmed = false;
-    resetAllBtn.textContent = '重置全部进度';
-    state.done.clear();
-    state.drafts.clear();
-    await saveProgress();
-    scheduleSaveDrafts();
-    renderList();
-    setStatus('ok', '已重置全部做题进度和草稿。');
-  });
-
-  main.append(el('div', { class: 'qhead' }, el('h2', { text: '题库管理' }), back, resetAllBtn));
+  main.append(el('div', { class: 'qhead' }, el('h2', { text: '题库管理' }), back));
 
   main.append(el('p', {
     class: 'desc',
@@ -1248,6 +1230,35 @@ function bindHeader() {
 
   const bankBtn = document.getElementById('bank-btn');
   if (bankBtn) bankBtn.addEventListener('click', openBankManager);
+
+  const resetBtn = document.getElementById('reset-progress');
+  if (resetBtn) {
+    let armed = false;
+    let timer = null;
+    const restore = () => {
+      armed = false;
+      clearTimeout(timer);
+      resetBtn.textContent = '重置进度';
+      resetBtn.classList.remove('danger');
+    };
+    resetBtn.addEventListener('click', async () => {
+      if (!armed) {
+        armed = true;
+        resetBtn.textContent = '确定重置？';
+        resetBtn.classList.add('danger');
+        timer = setTimeout(restore, 4000);
+        return;
+      }
+      restore();
+      state.done.clear();
+      state.drafts.clear();
+      await saveProgress();
+      scheduleSaveDrafts();
+      renderList();
+      resetBtn.textContent = '已重置';
+      setTimeout(() => { resetBtn.textContent = '重置进度'; }, 1500);
+    });
+  }
 }
 
 async function loadBank() {

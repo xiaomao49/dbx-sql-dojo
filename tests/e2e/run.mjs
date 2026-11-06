@@ -297,10 +297,9 @@ const engineReady = (page) => page.waitForFunction(
   const draftsAfter = await page.evaluate(() => localStorage.getItem('dbx-stub:drafts'))
   check('刷新后草稿仍在', draftValue.includes('generate_series'), `value=${draftValue.slice(0, 40)} drafts=${String(draftsAfter).slice(0, 120)}`)
 
-  await page.locator('#bank-btn').click()
-  await page.waitForTimeout(200)
-  await page.locator('button', { hasText: '重置全部进度' }).click()
-  await page.locator('button', { hasText: '确定重置全部？' }).click()
+  await page.locator('#reset-progress').click()
+  await page.waitForFunction(() => document.querySelector('#reset-progress').textContent.includes('确定'))
+  await page.locator('#reset-progress').click()
   await page.waitForTimeout(400)
   check('一键重置清空进度', (await page.locator('#progress').textContent()).includes('0/'))
 
